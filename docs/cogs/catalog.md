@@ -193,8 +193,8 @@ This catalog specifies the exact responsibilities, trigger commands, and boundar
 ### `potw_lotw_message.py` (`PotwLotwMessageCog`)
 - **Primary Responsibility**: Posts the weekly Landing of the Week (LOTW) or Picture of the Week (POTW) announcement.
 - **Commands**:
-  - `/potw-lotw-message`: Manager and Executive roles choose the announcement type, enter a week number and topic, and optionally select a posting channel.
-- **Boundaries**: Posts to the current text channel when no destination is selected and attaches the corresponding announcement image.
+  - `/potw-lotw-message`: Manager and Executive roles choose the announcement type, enter a topic, and optionally override the destination channel.
+- **Boundaries**: Defaults to channel `1405962701242634270`, offers calendar weeks for the current month, previews the announcement with its image, and posts only after confirmation.
 
 ### `hajj_operations.py` (`HajjOperationsCog`)
 - **Primary Responsibility**: Seasonal operations handling charter flights into Jeddah (OEJN) and Medina (OEMA).
