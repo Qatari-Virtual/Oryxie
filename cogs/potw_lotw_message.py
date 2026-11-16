@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -7,18 +8,20 @@ from discord.ext import commands
 
 logger = logging.getLogger("oryxie.cogs.potw_lotw_message")
 
-LOTW_IMAGE_URL = (
-    "https://cdn.discordapp.com/attachments/1207938859292434473/"
-    "1571574325822230598/LOTW.png?ex=6afbe2e5&is=6afa9165&"
-    "hm=5ad54fdd8c81c9e4a3da906a5ee3c78608a2f30e76a46a7d87c657a0fdea4162"
-)
-POTW_IMAGE_URL = (
-    "https://cdn.discordapp.com/attachments/1197457653799059536/"
-    "1571574549101809814/POTW.jpg?ex=6afbe31a&is=6afa919a&"
-    "hm=ffd8f97f6f998bc6db358e995d1fc13e17b6a95cbffce812e40f377d0acf0b2f"
-)
+IMAGE_FILES = {
+    "lotw": Path(__file__).resolve().parents[1] / "assets" / "lotw.png",
+    "potw": Path(__file__).resolve().parents[1] / "assets" / "potw.jpg",
+}
 SUBMISSIONS_CHANNEL_NAME = "potw-and-lotw-submissions"
 AUTHORIZED_ROLE_NAMES = {"manager", "executive"}
+
+
+def ordinal(number: int) -> str:
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
 
 
 class PotwLotwMessageCog(commands.Cog):
@@ -38,6 +41,7 @@ class PotwLotwMessageCog(commands.Cog):
     )
     @app_commands.describe(
         message_type="Choose which weekly photo announcement to post",
+        week="Week number within the current month (1-6)",
         topic="This week's LOTW or POTW topic",
         channel="Where to post (defaults to the channel where you ran the command)",
     )
@@ -45,6 +49,7 @@ class PotwLotwMessageCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         message_type: app_commands.Choice[str],
+        week: app_commands.Range[int, 1, 6],
         topic: str,
         channel: discord.TextChannel | None = None,
     ):
@@ -78,11 +83,12 @@ class PotwLotwMessageCog(commands.Cog):
 
         is_lotw = message_type.value == "lotw"
         month = datetime.now(timezone.utc).strftime("%B")
+        week_label = f"{ordinal(week)} Week of {month}"
         kind = "LOTW" if is_lotw else "POTW"
         photo = "landings" if is_lotw else "pictures"
         restriction = "landing" if is_lotw else "picture"
         no_edit = "video" if is_lotw else "photo"
-        image_url = LOTW_IMAGE_URL if is_lotw else POTW_IMAGE_URL
+        image_path = IMAGE_FILES[message_type.value]
 
         guild = interaction.guild
         submission_channel = (
@@ -103,7 +109,7 @@ class PotwLotwMessageCog(commands.Cog):
         )
 
         content = (
-            f"**--- Week of {month}**\n\n"
+            f"**--- {week_label}**\n\n"
             f"This week's topic is **{topic}**\n\n"
             f"Use {submissions_reference} to submit a photo. "
             f"Only post {photo} from Infinite Flight.\n\n"
@@ -112,8 +118,6 @@ class PotwLotwMessageCog(commands.Cog):
             f"No edited {no_edit} is allowed\n\n"
             f"{entertainment_reference}"
         )
-        embed = discord.Embed()
-        embed.set_image(url=image_url)
         allowed_mentions = discord.AllowedMentions(
             everyone=False,
             users=False,
@@ -121,11 +125,19 @@ class PotwLotwMessageCog(commands.Cog):
         )
 
         try:
-            await target_channel.send(
-                content,
-                embed=embed,
-                allowed_mentions=allowed_mentions,
+            with image_path.open("rb") as image_file:
+                await target_channel.send(
+                    content,
+                    file=discord.File(image_file, filename=image_path.name),
+                    allowed_mentions=allowed_mentions,
+                )
+        except OSError:
+            logger.exception("Could not read the %s announcement image", kind)
+            await interaction.followup.send(
+                "The announcement image file is missing or unreadable.",
+                ephemeral=True,
             )
+            return
         except discord.Forbidden:
             logger.exception(
                 "Missing permission to post %s announcement in channel %s",
