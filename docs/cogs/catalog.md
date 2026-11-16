@@ -190,6 +190,12 @@ This catalog specifies the exact responsibilities, trigger commands, and boundar
   - `/event-flight`: Event briefing, slot booking, and route distribution.
 - **Dependencies**: `EventTransactionModel`, `RoutesModel`.
 
+### `potw_lotw_message.py` (`PotwLotwMessageCog`)
+- **Primary Responsibility**: Posts the weekly Landing of the Week (LOTW) or Picture of the Week (POTW) announcement.
+- **Commands**:
+  - `/potw-lotw-message`: Manager and Executive roles choose the announcement type, enter its topic, and optionally select a posting channel.
+- **Boundaries**: Posts to the current text channel when no destination is selected and includes the corresponding announcement image.
+
 ### `hajj_operations.py` (`HajjOperationsCog`)
 - **Primary Responsibility**: Seasonal operations handling charter flights into Jeddah (OEJN) and Medina (OEMA).
 - **Dependencies**: `assets/hajj_config.json`, `FlightService`.
