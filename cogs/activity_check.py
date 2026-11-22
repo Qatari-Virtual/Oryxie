@@ -11,6 +11,7 @@ class ActivityCheckCog(commands.Cog):
         self.TRAINEE_ROLE_ID = 1137998383630524477
         self.LOA_ROLE_ID = 1193185998859935755
         self.CODESHARE_REP_ROLE_ID = 1120952921299894354
+        self.FLEET_ROLE_ID = 1484645309983490119
 
     @app_commands.command(name="activity_check", description="Manage pilot activity checking")
     @app_commands.describe(
@@ -18,20 +19,23 @@ class ActivityCheckCog(commands.Cog):
         callsign="Pilot callsign (for check_pilot)"
     )
     @app_commands.choices(action=[
-        app_commands.Choice(name="Run Full Activity Check", value="run_check"),
+        app_commands.Choice(name="Activity Check(Everyone)", value="check_everyone"),
+        app_commands.Choice(name="Activity Check(Fleet)", value="check_fleet"),
         app_commands.Choice(name="Check Specific Pilot", value="check_pilot")
     ])
     @app_commands.checks.has_permissions(administrator=True)
     async def activity_check(self, interaction: discord.Interaction, action: str, callsign: str = None):
-        if action == "run_check":
-            await self._run_full_activity_check(interaction)
+        if action in ("check_everyone", "run_check"):
+            await self._run_activity_check(interaction, scope="everyone")
+        elif action == "check_fleet":
+            await self._run_activity_check(interaction, scope="fleet")
         elif action == "check_pilot":
             if not callsign:
                 await interaction.response.send_message("Callsign is required for pilot check.", ephemeral=True)
                 return
             await self._check_specific_pilot(interaction, callsign)
 
-    async def _run_full_activity_check(self, interaction: discord.Interaction):
+    async def _run_activity_check(self, interaction: discord.Interaction, scope: str = "everyone"):
         await interaction.response.defer(ephemeral=True)
         
         # Validate dependencies
@@ -39,9 +43,23 @@ class ActivityCheckCog(commands.Cog):
             await interaction.followup.send("❌ Database services not available!", ephemeral=True)
             return
         
-        # Get all server members
         guild = interaction.guild
-        members = guild.members
+        if not guild:
+            await interaction.followup.send("❌ Guild not found!", ephemeral=True)
+            return
+
+        # Target members based on scope
+        scope_title = "Everyone"
+        if scope == "fleet":
+            fleet_role = guild.get_role(self.FLEET_ROLE_ID)
+            if not fleet_role:
+                await interaction.followup.send(f"❌ Fleet role (ID: {self.FLEET_ROLE_ID}) not found!", ephemeral=True)
+                return
+            members = [member for member in guild.members if fleet_role in member.roles and not member.bot]
+            scope_title = "Fleet"
+        else:
+            members = [member for member in guild.members if not member.bot]
+            scope_title = "Everyone"
         
         # Get roles
         inactive_role = guild.get_role(self.INACTIVE_ROLE_ID)
@@ -158,7 +176,7 @@ class ActivityCheckCog(commands.Cog):
                     skipped_already_inactive += 1
         
         # Send reports
-        await self._send_summary_report(interaction, len(members), len(pilots_found), len(no_callsign), 
+        await self._send_summary_report(interaction, scope_title, len(members), len(pilots_found), len(no_callsign), 
                                       processed, removed_inactive, skipped_protected, skipped_trainee, skipped_loa, skipped_already_inactive, 
                                       skipped_veteran, skipped_active, skipped_codeshare_rep)
         
@@ -266,15 +284,15 @@ class ActivityCheckCog(commands.Cog):
         result = await self.bot.db_manager.fetch_one(query, (pilot_id,))
         return result['pirep_date'] if result else None
 
-    async def _send_summary_report(self, interaction, total_members, pilots_found, no_callsign_count, 
+    async def _send_summary_report(self, interaction, scope_title, total_members, pilots_found, no_callsign_count, 
                                  processed, removed_inactive, skipped_protected, skipped_trainee, skipped_loa, skipped_already_inactive, 
                                  skipped_veteran, skipped_active, skipped_codeshare_rep):
         """Send summary report"""
         total_skipped = skipped_protected + skipped_trainee + skipped_loa + skipped_already_inactive + skipped_veteran + skipped_active + skipped_codeshare_rep
         
-        report = f"""Activity Check Complete!
+        report = f"""Activity Check Complete ({scope_title})!
 
-Server Members Scanned: {total_members}
+Members Scanned: {total_members}
 Pilots Found (QRV###): {pilots_found}
 No Callsign Found: {no_callsign_count}
 
@@ -336,9 +354,14 @@ SKIPPED BREAKDOWN:
     @activity_check.error
     async def on_activity_check_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
+            msg = "You need administrator permissions to use this command."
         else:
-            await interaction.response.send_message(f"An error occurred: {error}", ephemeral=True)
+            msg = f"An error occurred: {error}"
+            
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(ActivityCheckCog(bot))
