@@ -124,10 +124,10 @@ This catalog specifies the exact responsibilities, trigger commands, and boundar
 - **Dependencies**: `PilotsModel`.
 
 ### `activity_check.py` (`ActivityCheckCog`)
-- **Primary Responsibility**: Automated auditing of pilot flight activity to ensure roster hygiene.
+- **Primary Responsibility**: Automated auditing of pilot flight activity, trainee progression, and roster hygiene.
 - **Commands**:
-  - `/activity-check`: Scans for pilots without flight submissions in the past 30/60 days.
-- **Dependencies**: `PilotsModel`, `PirepsModel`.
+  - `/activity_check`: Supports scopes `Everyone`, `Fleet`, `Check Specific Pilot`, `Audit Active Pilots Missing Fleet Role`, and `Activity Check (Trainees)`.
+- **Dependencies**: `PilotsModel`, `DatabaseManager`.
 
 ### `pilot_reengagement_cog.py` (`PilotReengagementCog`)
 - **Primary Responsibility**: Automated campaigns re-engaging inactive pilots with personalized flight invitations.
