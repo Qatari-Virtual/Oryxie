@@ -15,6 +15,9 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog.FLEET_ROLE_ID, 1484645309983490119)
         self.assertEqual(self.cog.INACTIVE_ROLE_ID, 1224371905012961342)
         self.assertEqual(self.cog.MANAGER_ROLE_ID, 1150344935095152731)
+        self.assertEqual(self.cog.TRAINEE_ROLE_ID, 1137998383630524477)
+        self.assertIn(1090755316624408696, self.cog.GRADUATED_RANK_ROLE_IDS)
+        self.assertIn(1484645309983490119, self.cog.GRADUATED_RANK_ROLE_IDS)
         
         # Verify app command choices
         command = self.cog.activity_check
@@ -25,10 +28,14 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Activity Check(Everyone)", choice_names)
         self.assertIn("Activity Check(Fleet)", choice_names)
         self.assertIn("Check Specific Pilot", choice_names)
+        self.assertIn("Audit Active Pilots Missing Fleet Role", choice_names)
+        self.assertIn("Activity Check (Trainees)", choice_names)
         
         self.assertIn("check_everyone", choice_values)
         self.assertIn("check_fleet", choice_values)
         self.assertIn("check_pilot", choice_values)
+        self.assertIn("audit_fleet", choice_values)
+        self.assertIn("check_trainees", choice_values)
 
     async def test_should_pilot_be_inactive_exemptions(self):
         trainee_role = MagicMock()
@@ -214,11 +221,6 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
         m3.remove_roles.assert_called_with(inactive_role, reason="Recent activity")
 
         # Verify followup batch calls:
-        # call 0: initial status message
-        # call 1: Newly inactive batch
-        # call 2: Already inactive batch
-        # call 3: Reactivated batch
-        # call 4: Missing callsign batch
         followup_calls = [c[0][0] for c in interaction.followup.send.call_args_list]
         
         self.assertTrue(any("🔴 Newly Inactive Pilots" in call and "<@111>" in call for call in followup_calls))
@@ -241,6 +243,155 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
             f"❌ Fleet role (ID: {self.cog.FLEET_ROLE_ID}) not found!",
             ephemeral=True
         )
+
+    async def test_run_audit_active_missing_fleet(self):
+        interaction = AsyncMock()
+        guild = MagicMock()
+        interaction.guild = guild
+        interaction.response.defer = AsyncMock()
+        status_msg_mock = AsyncMock()
+        interaction.followup.send = AsyncMock(return_value=status_msg_mock)
+
+        fleet_role = MagicMock()
+        fleet_role.id = self.cog.FLEET_ROLE_ID
+        guild.get_role.side_effect = lambda r_id: fleet_role if r_id == self.cog.FLEET_ROLE_ID else None
+
+        # Member 1: Active, but missing Fleet role (should be reported)
+        m1 = MagicMock(spec=discord.Member)
+        m1.bot = False
+        m1.id = 501
+        m1.mention = "<@501>"
+        m1.display_name = "QRV501 Active Pilot"
+        m1.roles = []
+
+        # Member 2: Inactive (>30 days), missing Fleet role (should not be reported)
+        m2 = MagicMock(spec=discord.Member)
+        m2.bot = False
+        m2.id = 502
+        m2.mention = "<@502>"
+        m2.display_name = "QRV502 Inactive Pilot"
+        m2.roles = []
+
+        # Member 3: Active, but ALREADY HAS Fleet role (should not be scanned/reported)
+        m3 = MagicMock(spec=discord.Member)
+        m3.bot = False
+        m3.id = 503
+        m3.mention = "<@503>"
+        m3.display_name = "QRV503 Fleet Member"
+        m3.roles = [fleet_role]
+
+        guild.members = [m1, m2, m3]
+
+        async def mock_get_pilot(callsign):
+            if callsign == "QRV501":
+                return {'id': 501, 'callsign': 'QRV501'}
+            elif callsign == "QRV502":
+                return {'id': 502, 'callsign': 'QRV502'}
+            return None
+
+        self.bot.pilots_model.get_pilot_by_callsign = AsyncMock(side_effect=mock_get_pilot)
+        self.bot.pilots_model.get_pilot_by_discord_id = AsyncMock(return_value=None)
+
+        async def mock_last_pirep(pilot_id):
+            if pilot_id == 501:
+                return datetime.now().date() - timedelta(days=8) # Active
+            elif pilot_id == 502:
+                return datetime.now().date() - timedelta(days=45) # Inactive
+            return None
+
+        self.cog._get_pilot_last_pirep_date = AsyncMock(side_effect=mock_last_pirep)
+
+        await self.cog._run_audit_active_missing_fleet(interaction)
+
+        # Status msg updated with summary embed
+        status_msg_mock.edit.assert_called()
+        edit_kwargs = status_msg_mock.edit.call_args[1]
+        embed = edit_kwargs['embed']
+        self.assertIn("Active Pilots Missing Fleet Role", embed.title)
+        self.assertIn("active pilots found", embed.fields[0].value)
+        self.assertIn("1", embed.fields[0].value)
+
+        # Followup sent containing batch with Member 1
+        followup_calls = [c[0][0] for c in interaction.followup.send.call_args_list]
+        self.assertTrue(any("QRV501" in call and "<@501>" in call for call in followup_calls))
+        self.assertFalse(any("QRV502" in call for call in followup_calls))
+
+    async def test_run_trainee_activity_check(self):
+        interaction = AsyncMock()
+        guild = MagicMock()
+        interaction.guild = guild
+        interaction.response.defer = AsyncMock()
+        status_msg_mock = AsyncMock()
+        interaction.followup.send = AsyncMock(return_value=status_msg_mock)
+
+        trainee_role = MagicMock()
+        trainee_role.id = self.cog.TRAINEE_ROLE_ID
+
+        cadet_role = MagicMock()
+        cadet_role.id = 1090755316624408696 # In GRADUATED_RANK_ROLE_IDS
+
+        guild.get_role.side_effect = lambda r_id: trainee_role if r_id == self.cog.TRAINEE_ROLE_ID else None
+
+        # Trainee 1: Has Trainee role AND Cadet role (Graduated)
+        t1 = MagicMock(spec=discord.Member)
+        t1.bot = False
+        t1.id = 601
+        t1.mention = "<@601>"
+        t1.display_name = "QRV601 Graduated"
+        t1.roles = [trainee_role, cadet_role]
+
+        # Trainee 2: Inactive Trainee (Last PIREP 50 days ago)
+        t2 = MagicMock(spec=discord.Member)
+        t2.bot = False
+        t2.id = 602
+        t2.mention = "<@602>"
+        t2.display_name = "QRV602 Inactive"
+        t2.roles = [trainee_role]
+
+        # Trainee 3: Unregistered (No callsign, no profile)
+        t3 = MagicMock(spec=discord.Member)
+        t3.bot = False
+        t3.id = 603
+        t3.mention = "<@603>"
+        t3.display_name = "RandomUser"
+        t3.roles = [trainee_role]
+
+        guild.members = [t1, t2, t3]
+
+        async def mock_get_pilot(callsign):
+            if callsign == "QRV601":
+                return {'id': 601, 'callsign': 'QRV601'}
+            elif callsign == "QRV602":
+                return {'id': 602, 'callsign': 'QRV602'}
+            return None
+
+        self.bot.pilots_model.get_pilot_by_callsign = AsyncMock(side_effect=mock_get_pilot)
+        self.bot.pilots_model.get_pilot_by_discord_id = AsyncMock(return_value=None)
+
+        async def mock_last_pirep(pilot_id):
+            if pilot_id == 601:
+                return datetime.now().date() - timedelta(days=5)
+            elif pilot_id == 602:
+                return datetime.now().date() - timedelta(days=50)
+            return None
+
+        self.cog._get_pilot_last_pirep_date = AsyncMock(side_effect=mock_last_pirep)
+
+        await self.cog._run_trainee_activity_check(interaction)
+
+        # Status msg updated with summary embed
+        status_msg_mock.edit.assert_called()
+        edit_kwargs = status_msg_mock.edit.call_args[1]
+        embed = edit_kwargs['embed']
+        self.assertIn("Trainee Role Audit & Activity Report", embed.title)
+        self.assertIn("1", embed.fields[0].value) # 1 Graduated
+        self.assertIn("1", embed.fields[1].value) # 1 Inactive
+        self.assertIn("1", embed.fields[2].value) # 1 Unregistered
+
+        followup_calls = [c[0][0] for c in interaction.followup.send.call_args_list]
+        self.assertTrue(any("Graduated / Active Trainees" in call and "<@601>" in call for call in followup_calls))
+        self.assertTrue(any("Inactive Trainees" in call and "<@602>" in call for call in followup_calls))
+        self.assertTrue(any("Unregistered Trainees" in call and "<@603>" in call for call in followup_calls))
 
     def test_manager_role_permission(self):
         check_func = self.cog.activity_check.checks[0]

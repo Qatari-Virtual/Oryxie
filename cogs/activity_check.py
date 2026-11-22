@@ -26,6 +26,19 @@ class ActivityCheckCog(commands.Cog):
         self.CODESHARE_REP_ROLE_ID = 1120952921299894354
         self.FLEET_ROLE_ID = 1484645309983490119
         self.MANAGER_ROLE_ID = MANAGER_ROLE_ID
+        self.GRADUATED_RANK_ROLE_IDS = {
+            1090755316624408696,  # Cadet
+            1090755686104825977,  # Second Officer
+            1090755990569357312,  # First Officer
+            1090756112158044230,  # Captain
+            1090756368631341056,  # Senior Captain
+            1090757434617888889,  # Ruby
+            1090757602230673448,  # Sapphire
+            1090757780085940375,  # Emerald
+            1171821033154691182,  # OneWorld
+            1308739377739993088,  # Oryx
+            1484645309983490119,  # Fleet Role
+        }
 
     @app_commands.command(name="activity_check", description="Manage pilot activity checking")
     @app_commands.describe(
@@ -35,7 +48,9 @@ class ActivityCheckCog(commands.Cog):
     @app_commands.choices(action=[
         app_commands.Choice(name="Activity Check(Everyone)", value="check_everyone"),
         app_commands.Choice(name="Activity Check(Fleet)", value="check_fleet"),
-        app_commands.Choice(name="Check Specific Pilot", value="check_pilot")
+        app_commands.Choice(name="Check Specific Pilot", value="check_pilot"),
+        app_commands.Choice(name="Audit Active Pilots Missing Fleet Role", value="audit_fleet"),
+        app_commands.Choice(name="Activity Check (Trainees)", value="check_trainees")
     ])
     @is_manager_or_admin()
     async def activity_check(self, interaction: discord.Interaction, action: str, callsign: str = None):
@@ -48,6 +63,10 @@ class ActivityCheckCog(commands.Cog):
                 await interaction.response.send_message("Callsign is required for pilot check.", ephemeral=True)
                 return
             await self._check_specific_pilot(interaction, callsign)
+        elif action == "audit_fleet":
+            await self._run_audit_active_missing_fleet(interaction)
+        elif action == "check_trainees":
+            await self._run_trainee_activity_check(interaction)
 
     async def _run_activity_check(self, interaction: discord.Interaction, scope: str = "everyone"):
         await interaction.response.defer(ephemeral=True)
@@ -249,6 +268,228 @@ class ActivityCheckCog(commands.Cog):
                         truncated_text = batch_text[:1800] + "...\n[Truncated]"
                         await interaction.followup.send(
                             f"**{category_name} (Batch {batch_num}/{total_batches}):**\n{truncated_text}",
+                            ephemeral=True
+                        )
+
+    async def _run_audit_active_missing_fleet(self, interaction: discord.Interaction):
+        """Audits server members to find active pilots (PIREP in last 30 days) who lack the Fleet role."""
+        await interaction.response.defer(ephemeral=True)
+
+        if not hasattr(self.bot, 'pilots_model') or not hasattr(self.bot, 'db_manager'):
+            await interaction.followup.send("❌ Database services not available!", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ Guild not found!", ephemeral=True)
+            return
+
+        fleet_role = guild.get_role(self.FLEET_ROLE_ID)
+        if not fleet_role:
+            await interaction.followup.send(f"❌ Fleet role (ID: {self.FLEET_ROLE_ID}) not found!", ephemeral=True)
+            return
+
+        # Target non-bot members who DO NOT have the Fleet role
+        members_without_fleet = [m for m in guild.members if fleet_role not in m.roles and not m.bot]
+
+        status_message = await interaction.followup.send(
+            f"🚀 Scanning **{len(members_without_fleet)}** members without the Fleet role for recent flight activity... This may take a moment."
+        )
+
+        active_missing_fleet_info = []
+        scanned_pilots = 0
+
+        for member in members_without_fleet:
+            callsign = None
+            callsign_match = re.search(r'QRV\d{3,}', member.display_name, re.IGNORECASE)
+            if callsign_match:
+                callsign = callsign_match.group(0).upper()
+            else:
+                try:
+                    pilot_by_discord = await self.bot.pilots_model.get_pilot_by_discord_id(str(member.id))
+                    if pilot_by_discord and pilot_by_discord.get('callsign'):
+                        callsign = pilot_by_discord['callsign']
+                except Exception:
+                    pass
+
+            if not callsign:
+                continue
+
+            scanned_pilots += 1
+            pilot_data = await self.bot.pilots_model.get_pilot_by_callsign(callsign)
+            if not pilot_data:
+                continue
+
+            last_pirep_date = await self._get_pilot_last_pirep_date(pilot_data['id'])
+            if last_pirep_date:
+                days_since = (datetime.now().date() - last_pirep_date).days
+                if days_since < 30:
+                    last_pirep_str = last_pirep_date.strftime('%Y-%m-%d')
+                    active_missing_fleet_info.append(
+                        f"{member.mention} ({callsign}) : Active ({days_since}d ago, last PIREP: {last_pirep_str})"
+                    )
+
+        embed = discord.Embed(
+            title="📋 Active Pilots Missing Fleet Role",
+            description="The following pilots have filed an approved PIREP within the last 30 days but do NOT have the Fleet role.",
+            color=discord.Color.gold()
+        )
+        embed.add_field(
+            name="✈️ Active Pilots Without Fleet Role",
+            value=f"`{len(active_missing_fleet_info)}` active pilots found.",
+            inline=False
+        )
+        embed.set_footer(
+            text=f"Total scanned without Fleet role: {len(members_without_fleet)} | QRV pilots matched: {scanned_pilots}"
+        )
+
+        await status_message.edit(content="Audit complete!", embed=embed)
+
+        # Batch send member lines (15 per message to stay safely under 2000 characters)
+        if active_missing_fleet_info:
+            total_batches = (len(active_missing_fleet_info) + 14) // 15
+            for i in range(0, len(active_missing_fleet_info), 15):
+                batch = active_missing_fleet_info[i:i + 15]
+                batch_text = "\n".join(batch)
+                batch_num = (i // 15) + 1
+                try:
+                    await interaction.followup.send(
+                        f"**Active Pilots Missing Fleet Role (Batch {batch_num}/{total_batches}):**\n{batch_text}",
+                        ephemeral=True
+                    )
+                except discord.HTTPException:
+                    truncated = batch_text[:1800] + "...\n[Truncated]"
+                    await interaction.followup.send(
+                        f"**Active Pilots Missing Fleet Role (Batch {batch_num}/{total_batches}):**\n{truncated}",
+                        ephemeral=True
+                    )
+
+    async def _run_trainee_activity_check(self, interaction: discord.Interaction):
+        """Audits members with the Trainee role to identify graduated, inactive, or unregistered members."""
+        await interaction.response.defer(ephemeral=True)
+
+        if not hasattr(self.bot, 'pilots_model') or not hasattr(self.bot, 'db_manager'):
+            await interaction.followup.send("❌ Database services not available!", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ Guild not found!", ephemeral=True)
+            return
+
+        trainee_role = guild.get_role(self.TRAINEE_ROLE_ID)
+        if not trainee_role:
+            await interaction.followup.send(f"❌ Trainee role (ID: {self.TRAINEE_ROLE_ID}) not found!", ephemeral=True)
+            return
+
+        trainee_members = [m for m in guild.members if trainee_role in m.roles and not m.bot]
+
+        status_message = await interaction.followup.send(
+            f"🚀 Starting Trainee Activity Check for **{len(trainee_members)}** members with the Trainee role... This may take a moment."
+        )
+
+        graduated_info = []
+        inactive_info = []
+        unregistered_info = []
+
+        for member in trainee_members:
+            # 1. Check if member already has higher pilot rank roles or Fleet role
+            has_rank_or_fleet = any(role.id in self.GRADUATED_RANK_ROLE_IDS for role in member.roles)
+
+            # 2. Check callsign / DB profile
+            callsign = None
+            callsign_match = re.search(r'QRV\d{3,}', member.display_name, re.IGNORECASE)
+            if callsign_match:
+                callsign = callsign_match.group(0).upper()
+            else:
+                try:
+                    pilot_by_discord = await self.bot.pilots_model.get_pilot_by_discord_id(str(member.id))
+                    if pilot_by_discord and pilot_by_discord.get('callsign'):
+                        callsign = pilot_by_discord['callsign']
+                except Exception:
+                    pass
+
+            if not callsign:
+                # No QRV callsign or DB profile
+                if has_rank_or_fleet:
+                    graduated_info.append(f"{member.mention} : Graduated (Has pilot rank/fleet role, no callsign)")
+                else:
+                    unregistered_info.append(f"{member.mention} : No QRV callsign found : {member.display_name}")
+                continue
+
+            pilot_data = await self.bot.pilots_model.get_pilot_by_callsign(callsign)
+            if not pilot_data:
+                if has_rank_or_fleet:
+                    graduated_info.append(f"{member.mention} ({callsign}) : Graduated (Has pilot rank/fleet role, no DB record)")
+                else:
+                    unregistered_info.append(f"{member.mention} ({callsign}) : Pilot record not found in DB")
+                continue
+
+            last_pirep_date = await self._get_pilot_last_pirep_date(pilot_data['id'])
+            days_since = (datetime.now().date() - last_pirep_date).days if last_pirep_date else None
+            last_pirep_str = last_pirep_date.strftime('%Y-%m-%d') if last_pirep_date else 'Never'
+
+            # If member has a higher rank role, or flew recently (< 30 days)
+            if has_rank_or_fleet:
+                graduated_info.append(
+                    f"{member.mention} ({callsign}) : Graduated (Has pilot rank/fleet role, last PIREP: {last_pirep_str})"
+                )
+            elif days_since is not None and days_since < 30:
+                graduated_info.append(
+                    f"{member.mention} ({callsign}) : Active Pilot (Last PIREP: {last_pirep_str}, {days_since}d ago - ready for role removal)"
+                )
+            else:
+                days_desc = f"{days_since}d ago" if days_since is not None else "no PIREPs"
+                inactive_info.append(
+                    f"{member.mention} ({callsign}) : Inactive Trainee (Last PIREP: {last_pirep_str}, {days_desc})"
+                )
+
+        embed = discord.Embed(
+            title="📋 Trainee Role Audit & Activity Report",
+            description=f"Audited **{len(trainee_members)}** members currently assigned the Trainee role.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(
+            name="🎓 Graduated / Active (Trainee Role Can Be Removed)",
+            value=f"`{len(graduated_info)}` members hold pilot rank/fleet roles or recent flight logs.",
+            inline=False
+        )
+        embed.add_field(
+            name="💤 Inactive Trainees",
+            value=f"`{len(inactive_info)}` trainees have no PIREPs in 30+ days or never flew.",
+            inline=False
+        )
+        embed.add_field(
+            name="❓ Unregistered / No Callsign",
+            value=f"`{len(unregistered_info)}` members without valid QRV callsigns or database profiles.",
+            inline=False
+        )
+        embed.set_footer(text=f"Total Trainees scanned: {len(trainee_members)}")
+
+        await status_message.edit(content="Trainee activity check complete!", embed=embed)
+
+        categories = [
+            ("🎓 Graduated / Active Trainees (Ready For Trainee Role Removal)", graduated_info),
+            ("💤 Inactive Trainees", inactive_info),
+            ("❓ Unregistered Trainees", unregistered_info)
+        ]
+
+        for category_name, info_list in categories:
+            if info_list:
+                total_batches = (len(info_list) + 14) // 15
+                for i in range(0, len(info_list), 15):
+                    batch = info_list[i:i + 15]
+                    batch_text = "\n".join(batch)
+                    batch_num = (i // 15) + 1
+                    try:
+                        await interaction.followup.send(
+                            f"**{category_name} (Batch {batch_num}/{total_batches}):**\n{batch_text}",
+                            ephemeral=True
+                        )
+                    except discord.HTTPException:
+                        truncated = batch_text[:1800] + "...\n[Truncated]"
+                        await interaction.followup.send(
+                            f"**{category_name} (Batch {batch_num}/{total_batches}):**\n{truncated}",
                             ephemeral=True
                         )
     
