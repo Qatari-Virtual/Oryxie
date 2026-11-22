@@ -4,6 +4,19 @@ from discord import app_commands
 import re
 from datetime import datetime, timedelta
 
+MANAGER_ROLE_ID = 1150344935095152731
+
+def is_manager_or_admin():
+    def predicate(interaction: discord.Interaction) -> bool:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return False
+        if any(role.id == MANAGER_ROLE_ID for role in interaction.user.roles):
+            return True
+        if interaction.user.guild_permissions.administrator:
+            return True
+        raise app_commands.MissingRole(MANAGER_ROLE_ID)
+    return app_commands.check(predicate)
+
 class ActivityCheckCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -12,6 +25,7 @@ class ActivityCheckCog(commands.Cog):
         self.LOA_ROLE_ID = 1193185998859935755
         self.CODESHARE_REP_ROLE_ID = 1120952921299894354
         self.FLEET_ROLE_ID = 1484645309983490119
+        self.MANAGER_ROLE_ID = MANAGER_ROLE_ID
 
     @app_commands.command(name="activity_check", description="Manage pilot activity checking")
     @app_commands.describe(
@@ -23,7 +37,7 @@ class ActivityCheckCog(commands.Cog):
         app_commands.Choice(name="Activity Check(Fleet)", value="check_fleet"),
         app_commands.Choice(name="Check Specific Pilot", value="check_pilot")
     ])
-    @app_commands.checks.has_permissions(administrator=True)
+    @is_manager_or_admin()
     async def activity_check(self, interaction: discord.Interaction, action: str, callsign: str = None):
         if action in ("check_everyone", "run_check"):
             await self._run_activity_check(interaction, scope="everyone")
@@ -353,8 +367,8 @@ SKIPPED BREAKDOWN:
 
     @activity_check.error
     async def on_activity_check_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
-            msg = "You need administrator permissions to use this command."
+        if isinstance(error, (app_commands.MissingRole, app_commands.MissingPermissions)):
+            msg = "You need the Manager role to use this command."
         else:
             msg = f"An error occurred: {error}"
             

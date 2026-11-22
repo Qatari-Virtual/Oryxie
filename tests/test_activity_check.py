@@ -14,6 +14,7 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
     def test_command_choices_and_role_id(self):
         self.assertEqual(self.cog.FLEET_ROLE_ID, 1484645309983490119)
         self.assertEqual(self.cog.INACTIVE_ROLE_ID, 1224371905012961342)
+        self.assertEqual(self.cog.MANAGER_ROLE_ID, 1150344935095152731)
         
         # Verify app command choices
         command = self.cog.activity_check
@@ -142,6 +143,40 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
             f"❌ Fleet role (ID: {self.cog.FLEET_ROLE_ID}) not found!",
             ephemeral=True
         )
+
+    def test_manager_role_permission(self):
+        check_func = self.cog.activity_check.checks[0]
+
+        # Member with manager role
+        manager_role = MagicMock()
+        manager_role.id = 1150344935095152731
+
+        member = MagicMock(spec=discord.Member)
+        member.roles = [manager_role]
+        member.guild_permissions.administrator = False
+
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.guild = MagicMock()
+        interaction.user = member
+
+        self.assertTrue(check_func(interaction))
+
+        # Member with admin perm
+        admin_member = MagicMock(spec=discord.Member)
+        admin_member.roles = []
+        admin_member.guild_permissions.administrator = True
+        interaction.user = admin_member
+
+        self.assertTrue(check_func(interaction))
+
+        # Member without manager role or admin
+        regular_member = MagicMock(spec=discord.Member)
+        regular_member.roles = []
+        regular_member.guild_permissions.administrator = False
+        interaction.user = regular_member
+
+        with self.assertRaises(discord.app_commands.MissingRole):
+            check_func(interaction)
 
 if __name__ == "__main__":
     unittest.main()
