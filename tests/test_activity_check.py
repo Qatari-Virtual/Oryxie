@@ -119,14 +119,112 @@ class TestActivityCheckCog(unittest.IsolatedAsyncioTestCase):
         self.cog._get_pilot_flight_hours = AsyncMock(return_value=10.0)
         self.cog._get_pilot_last_pirep_date = AsyncMock(return_value=datetime.now().date() - timedelta(days=5)) # Active
 
+        status_msg_mock = AsyncMock()
+        interaction.followup.send = AsyncMock(return_value=status_msg_mock)
+
         await self.cog._run_activity_check(interaction, scope="fleet")
 
-        # Verify only 1 member (m1) was scanned
+        # Verify initial status message was sent for 1 member
         interaction.followup.send.assert_called()
-        report_msg = interaction.followup.send.call_args[0][0]
-        self.assertIn("Activity Check Complete (Fleet)!", report_msg)
-        self.assertIn("Members Scanned: 1", report_msg)
-        self.assertIn("Pilots Found (QRV###): 1", report_msg)
+        self.assertIn("1", interaction.followup.send.call_args_list[0][0][0])
+        
+        # Verify status message was edited with the summary Embed
+        status_msg_mock.edit.assert_called()
+        edit_kwargs = status_msg_mock.edit.call_args[1]
+        embed = edit_kwargs['embed']
+        self.assertIn("Fleet", embed.title)
+        self.assertEqual(embed.footer.text, "Total members scanned: 1 | Pilots found: 1")
+
+    async def test_run_activity_check_batch_logging(self):
+        interaction = AsyncMock()
+        guild = MagicMock()
+        interaction.guild = guild
+        interaction.response.defer = AsyncMock()
+        status_msg_mock = AsyncMock()
+        interaction.followup.send = AsyncMock(return_value=status_msg_mock)
+
+        inactive_role = MagicMock()
+        inactive_role.id = self.cog.INACTIVE_ROLE_ID
+        guild.get_role.side_effect = lambda r_id: inactive_role if r_id == self.cog.INACTIVE_ROLE_ID else None
+
+        # Pilot 1: Newly inactive (does not have inactive role, last PIREP > 30 days)
+        m1 = MagicMock(spec=discord.Member)
+        m1.bot = False
+        m1.mention = "<@111>"
+        m1.display_name = "QRV201 Newly Inactive"
+        m1.roles = []
+        m1.add_roles = AsyncMock()
+        m1.remove_roles = AsyncMock()
+
+        # Pilot 2: Already inactive (already has inactive role, last PIREP > 30 days)
+        m2 = MagicMock(spec=discord.Member)
+        m2.bot = False
+        m2.mention = "<@222>"
+        m2.display_name = "QRV202 Already Inactive"
+        m2.roles = [inactive_role]
+        m2.add_roles = AsyncMock()
+        m2.remove_roles = AsyncMock()
+
+        # Pilot 3: Reactivated (has inactive role, but recent PIREP)
+        m3 = MagicMock(spec=discord.Member)
+        m3.bot = False
+        m3.mention = "<@333>"
+        m3.display_name = "QRV203 Reactivated"
+        m3.roles = [inactive_role]
+        m3.add_roles = AsyncMock()
+        m3.remove_roles = AsyncMock()
+
+        # Member 4: Missing callsign
+        m4 = MagicMock(spec=discord.Member)
+        m4.bot = False
+        m4.mention = "<@444>"
+        m4.display_name = "JustUser"
+        m4.roles = []
+
+        guild.members = [m1, m2, m3, m4]
+
+        async def mock_get_pilot(callsign):
+            if callsign == "QRV201":
+                return {'id': 201, 'callsign': 'QRV201'}
+            elif callsign == "QRV202":
+                return {'id': 202, 'callsign': 'QRV202'}
+            elif callsign == "QRV203":
+                return {'id': 203, 'callsign': 'QRV203'}
+            return None
+
+        self.bot.pilots_model.get_pilot_by_callsign = AsyncMock(side_effect=mock_get_pilot)
+        self.bot.pilots_model.get_pilot_by_discord_id = AsyncMock(return_value=None)
+        self.cog._get_pilot_flight_hours = AsyncMock(return_value=10.0)
+
+        async def mock_last_pirep(pilot_id):
+            if pilot_id == 201:
+                return datetime.now().date() - timedelta(days=45)
+            elif pilot_id == 202:
+                return datetime.now().date() - timedelta(days=60)
+            elif pilot_id == 203:
+                return datetime.now().date() - timedelta(days=5)
+            return None
+
+        self.cog._get_pilot_last_pirep_date = AsyncMock(side_effect=mock_last_pirep)
+
+        await self.cog._run_activity_check(interaction, scope="everyone")
+
+        # Verify role modifications
+        m1.add_roles.assert_called_with(inactive_role, reason="No PIREP in 30+ days")
+        m3.remove_roles.assert_called_with(inactive_role, reason="Recent activity")
+
+        # Verify followup batch calls:
+        # call 0: initial status message
+        # call 1: Newly inactive batch
+        # call 2: Already inactive batch
+        # call 3: Reactivated batch
+        # call 4: Missing callsign batch
+        followup_calls = [c[0][0] for c in interaction.followup.send.call_args_list]
+        
+        self.assertTrue(any("🔴 Newly Inactive Pilots" in call and "<@111>" in call for call in followup_calls))
+        self.assertTrue(any("⚠️ Already Inactive Pilots" in call and "<@222>" in call for call in followup_calls))
+        self.assertTrue(any("🟢 Reactivated Pilots" in call and "<@333>" in call for call in followup_calls))
+        self.assertTrue(any("❓ Missing Callsign" in call and "<@444>" in call for call in followup_calls))
 
     async def test_run_activity_check_missing_fleet_role(self):
         interaction = AsyncMock()
