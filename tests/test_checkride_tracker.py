@@ -192,7 +192,7 @@ class TestCheckrideModel:
         assert results[0]["id"] == 1
         mock_db.fetch_all.assert_called_once()
         query = mock_db.fetch_all.call_args[0][0]
-        assert "FROM replay r" in query
+        assert "FROM replays r" in query
         assert "WHERE r.approved = 0" in query
         assert "ORDER BY r.upload_date ASC" in query
 
