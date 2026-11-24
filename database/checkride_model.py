@@ -43,7 +43,7 @@ class CheckrideModel:
                 fi.callsign AS fi_callsign,
                 fi.name AS fi_name,
                 fi.discordid AS fi_discord_id
-            FROM replay r
+            FROM replays r
             JOIN pilots t ON r.pilotid = t.id
             LEFT JOIN pilots fi ON r.approved_by = fi.id
             WHERE r.approved = 0
@@ -81,7 +81,7 @@ class CheckrideModel:
                 fi.callsign AS fi_callsign,
                 fi.name AS fi_name,
                 fi.discordid AS fi_discord_id
-            FROM replay r
+            FROM replays r
             JOIN pilots t ON r.pilotid = t.id
             LEFT JOIN pilots fi ON r.approved_by = fi.id
             WHERE r.id = %s
