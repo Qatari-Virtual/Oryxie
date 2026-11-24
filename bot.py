@@ -24,6 +24,7 @@ from api.if_live_manager import IFLiveManager
 from database.if_live_tokens_model import IFLiveTokensModel
 from database.stopped_flight_model import StoppedFlightModel
 from database.reengagement_model import ReengagementModel
+from database.checkride_model import CheckrideModel
 try:
     from services.ai_service import AIService
 except ImportError:
@@ -62,6 +63,7 @@ class MyBot(commands.Bot):
         self.flight_board_model: FlightBoardModel = None
         self.stopped_flight_model: StoppedFlightModel = None
         self.reengagement_model: ReengagementModel = None
+        self.checkride_model: CheckrideModel = None
         self.flightdata: FlightData = None
         # VA Data Models
         self.rank_model: RankModel = None
@@ -102,6 +104,7 @@ class MyBot(commands.Bot):
         self.flight_board_model = FlightBoardModel(self.db_manager)
         self.stopped_flight_model = StoppedFlightModel(self.db_manager)
         self.reengagement_model = ReengagementModel(self.db_manager)
+        self.checkride_model = CheckrideModel(self.db_manager)
         
         # Initialize VA Data Models
         self.rank_model = RankModel(self.db_manager)
@@ -200,6 +203,7 @@ class MyBot(commands.Bot):
             "cogs.takeoff_window_monitor",
             "cogs.potw_lotw_message",
             "cogs.activity_check",
+            "cogs.checkride_tracker",
         )
         loaded_extensions = []
         for extension in extensions:
