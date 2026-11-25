@@ -31,7 +31,14 @@ try:
 except Exception:
     _AIRPORTS_DB = None
 
-from api.if_live_manager import AircraftPersistenceState, IFAircraft, IFAircraftPosition, ScheduledFlightStatus
+from api.if_live_manager import (
+    AircraftPersistenceState,
+    IFAircraft,
+    IFAircraftPosition,
+    IFLiveAuthError,
+    IFLiveForbiddenError,
+    ScheduledFlightStatus,
+)
 
 log = logging.getLogger(__name__)
 
@@ -492,6 +499,7 @@ class LiveFleetService:
         }
 
         self._lock = asyncio.Lock()
+        self._members_lock = asyncio.Lock()
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Return current cache usage and refetch statistics."""
@@ -509,6 +517,7 @@ class LiveFleetService:
         self._fleet_list_fetched_at = 0.0
         self._v3_positions_fetched_at = 0.0
         self._schedules_fetched_at = 0.0
+        self._org_members = None
         self._org_members_fetched_at = 0.0
         self._v2_sessions_fetched_at = 0.0
         self._v2_flights_fetched_at = 0.0
@@ -568,9 +577,240 @@ class LiveFleetService:
         self._schedules_fetched_at = now
         return self._schedules
 
+    @staticmethod
+    def _normalize_org_member(member: Any) -> Optional[Dict[str, Any]]:
+        """Extract normalized user_id, username, role, and active_lifts from a member entry."""
+        if isinstance(member, dict):
+            user_id = member.get("userId") or member.get("user_id")
+            username = member.get("username")
+            role = member.get("role", 0)
+            raw_lifts = member.get("activeLifts")
+            if raw_lifts is None:
+                raw_lifts = member.get("active_lifts", 0)
+        else:
+            user_id = getattr(member, "user_id", None) or getattr(member, "userId", None)
+            username = getattr(member, "username", None)
+            role = getattr(member, "role", 0)
+            raw_lifts = getattr(member, "active_lifts", None)
+            if raw_lifts is None:
+                raw_lifts = getattr(member, "activeLifts", 0)
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            return None
+
+        try:
+            active_lifts = int(raw_lifts or 0)
+        except (TypeError, ValueError):
+            active_lifts = 0
+
+        try:
+            role_int = int(role if role is not None else 0)
+        except (TypeError, ValueError):
+            role_int = 0
+
+        clean_username = str(username).strip() if username else None
+        return {
+            "user_id": uid,
+            "username": clean_username,
+            "role": role_int,
+            "active_lifts": max(0, active_lifts),
+        }
+
+    @classmethod
+    def _index_org_members(
+        cls, members: List[Any]
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], int]:
+        """Build case-insensitive lookup maps by IF user_id and username."""
+        by_user_id: Dict[str, Dict[str, Any]] = {}
+        by_username: Dict[str, Dict[str, Any]] = {}
+        members_with_lifts = 0
+        for member in members or []:
+            info = cls._normalize_org_member(member)
+            if not info:
+                continue
+            by_user_id[info["user_id"].lower()] = info
+            if info["username"]:
+                by_username[info["username"].lower()] = info
+            if info["active_lifts"] > 0:
+                members_with_lifts += 1
+        return by_user_id, by_username, members_with_lifts
+
+    def _get_cached_org_members_locked(
+        self, now: float, force: bool = False
+    ) -> Tuple[Optional[List[Any]], Optional[float]]:
+        """Return cached org members if within 15m TTL, discarding entries past 1h max age."""
+        age = (now - self._org_members_fetched_at) if self._org_members_fetched_at > 0 else None
+        if self._org_members is not None and age is not None and age >= MAX_CACHE_EXPIRY_SECONDS:
+            log.info(
+                "[LIFTS-CACHE] Discarding org members cache after %.1fs (>= %.0fs max TTL)",
+                age,
+                MAX_CACHE_EXPIRY_SECONDS,
+            )
+            self._org_members = None
+            self._org_members_fetched_at = 0.0
+            return None, None
+
+        if (
+            not force
+            and self._org_members is not None
+            and age is not None
+            and age < TTL_ORGANIZATION_MEMBERS
+        ):
+            return self._org_members, age
+
+        return None, age
+
+    def _record_org_members_locked(self, members: Any, source: str, org_id: str) -> List[Any]:
+        """Store refreshed org members in the 15-minute RAM cache and log summary."""
+        self._org_members = members if isinstance(members, list) else []
+        self._org_members_fetched_at = time.monotonic()
+        by_uid, _, lifts_count = self._index_org_members(self._org_members)
+        log.info(
+            "[LIFTS-CACHE] Refreshed org %s members (%s): total_members=%d, members_with_active_lifts=%d, ttl=%.0fs",
+            org_id,
+            source,
+            len(by_uid),
+            lifts_count,
+            TTL_ORGANIZATION_MEMBERS,
+        )
+        return self._org_members
+
+    async def get_organization_members_lifts(
+        self,
+        organization_id: Optional[str] = None,
+        force_refresh: bool = False,
+        pilot_id: int = 1,
+    ) -> Dict[str, Any]:
+        """Return cached organization members indexed by IF user_id and username for lift checks.
+
+        Uses a 15-minute TTL cache (TTL_ORGANIZATION_MEMBERS = 900s) and discards entries
+        older than 1 hour (MAX_CACHE_EXPIRY_SECONDS = 3600s) per IF API rules.
+        """
+        org_id = (organization_id or os.getenv("IF_ORGANIZATION_ID", "")).strip()
+        if not org_id:
+            return {
+                "success": False,
+                "cache_hit": False,
+                "cache_age_seconds": None,
+                "ttl_seconds": TTL_ORGANIZATION_MEMBERS,
+                "total_members": 0,
+                "members_with_lifts": 0,
+                "by_user_id": {},
+                "by_username": {},
+                "stale_fallback": False,
+                "error": "IF_ORGANIZATION_ID is not configured.",
+            }
+
+        async with self._members_lock:
+            now = time.monotonic()
+            cached, age = self._get_cached_org_members_locked(now, force=force_refresh)
+            if cached is not None:
+                by_uid, by_uname, lifts_count = self._index_org_members(cached)
+                log.info(
+                    "[LIFTS-CACHE] Cache HIT for org %s: members=%d, members_with_active_lifts=%d, age=%.1fs/%.0fs (next refresh in %.1fs)",
+                    org_id,
+                    len(by_uid),
+                    lifts_count,
+                    age,
+                    TTL_ORGANIZATION_MEMBERS,
+                    max(0.0, TTL_ORGANIZATION_MEMBERS - (age or 0.0)),
+                )
+                return {
+                    "success": True,
+                    "cache_hit": True,
+                    "cache_age_seconds": age,
+                    "ttl_seconds": TTL_ORGANIZATION_MEMBERS,
+                    "total_members": len(by_uid),
+                    "members_with_lifts": lifts_count,
+                    "by_user_id": by_uid,
+                    "by_username": by_uname,
+                    "stale_fallback": False,
+                    "error": None,
+                }
+
+            log.info(
+                "[LIFTS-CACHE] Cache MISS for org %s (force=%s, prev_age=%s) -> querying /live/organizations/%s/members",
+                org_id,
+                force_refresh,
+                f"{age:.1f}s" if age is not None else "none",
+                org_id,
+            )
+
+            try:
+                async with await self.v3_manager.get_client(pilot_id) as client:
+                    if not hasattr(client, "list_organization_members"):
+                        raise RuntimeError("IF Live client does not support list_organization_members")
+                    self.api_call_counts["v3_members"] += 1
+                    raw_members = await client.list_organization_members(org_id)
+
+                members = self._record_org_members_locked(raw_members, source="lifts_lookup", org_id=org_id)
+                by_uid, by_uname, lifts_count = self._index_org_members(members)
+                return {
+                    "success": True,
+                    "cache_hit": False,
+                    "cache_age_seconds": 0.0,
+                    "ttl_seconds": TTL_ORGANIZATION_MEMBERS,
+                    "total_members": len(by_uid),
+                    "members_with_lifts": lifts_count,
+                    "by_user_id": by_uid,
+                    "by_username": by_uname,
+                    "stale_fallback": False,
+                    "error": None,
+                }
+            except Exception as exc:
+                log.warning(
+                    "[LIFTS-CACHE] Failed to fetch org %s members from IF v3 API: %s",
+                    org_id,
+                    exc,
+                )
+                if (
+                    self._org_members is not None
+                    and age is not None
+                    and age < MAX_CACHE_EXPIRY_SECONDS
+                    and not isinstance(exc, (IFLiveAuthError, IFLiveForbiddenError))
+                ):
+                    by_uid, by_uname, lifts_count = self._index_org_members(self._org_members)
+                    log.warning(
+                        "[LIFTS-CACHE] Serving stale (<1h) org %s members cache after transient error (age=%.1fs, members=%d)",
+                        org_id,
+                        age,
+                        len(by_uid),
+                    )
+                    return {
+                        "success": True,
+                        "cache_hit": True,
+                        "cache_age_seconds": age,
+                        "ttl_seconds": TTL_ORGANIZATION_MEMBERS,
+                        "total_members": len(by_uid),
+                        "members_with_lifts": lifts_count,
+                        "by_user_id": by_uid,
+                        "by_username": by_uname,
+                        "stale_fallback": True,
+                        "error": str(exc),
+                    }
+
+                return {
+                    "success": False,
+                    "cache_hit": False,
+                    "cache_age_seconds": age,
+                    "ttl_seconds": TTL_ORGANIZATION_MEMBERS,
+                    "total_members": 0,
+                    "members_with_lifts": 0,
+                    "by_user_id": {},
+                    "by_username": {},
+                    "stale_fallback": False,
+                    "error": str(exc),
+                }
+
     async def _get_organization_members(self, client, org_id: str, force: bool = False) -> List[Any]:
+        async with self._members_lock:
+            return await self._get_organization_members_unlocked(client, org_id, force=force)
+
+    async def _get_organization_members_unlocked(self, client, org_id: str, force: bool = False) -> List[Any]:
         now = time.monotonic()
-        if not force and self._org_members is not None and (now - self._org_members_fetched_at < TTL_ORGANIZATION_MEMBERS):
+        cached, age = self._get_cached_org_members_locked(now, force=force)
+        if cached is not None:
             return self._org_members
 
         if hasattr(client, "list_organization_members"):
@@ -581,10 +821,16 @@ class LiveFleetService:
                     self._org_members = members
                 else:
                     self._org_members = []
-                self._org_members_fetched_at = now
+                self._record_org_members_locked(self._org_members, source="fleet_sync", org_id=org_id)
                 return self._org_members
             except Exception as e:
                 log.warning("Could not fetch organization members: %s", e)
+                if (
+                    isinstance(e, (IFLiveAuthError, IFLiveForbiddenError))
+                    or age is None
+                    or age >= MAX_CACHE_EXPIRY_SECONDS
+                ):
+                    return []
                 return self._org_members or []
         return self._org_members or []
 
