@@ -1,6 +1,12 @@
 import logging
 from datetime import datetime
-from typing import List, Dict
+import os
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+FLEET_NON_LIFT_MULTIPLIER = "150000"
+FLEET_LIFT_MULTIPLIER = "200000"
+IF_LIVE_TOKEN_OWNER_ID = 1
 
 class PirepFilingService:
     def __init__(self, bot):
@@ -238,6 +244,273 @@ class PirepFilingService:
         
         return result
 
+    @staticmethod
+    def _extract_ifc_username(ifc_url: Optional[str]) -> Optional[str]:
+        """Extract an IFC username from a profile URL or plain username string."""
+        raw = str(ifc_url or "").strip()
+        if not raw:
+            return None
+        match = re.search(r"/u/([^/?#]+)", raw)
+        if match:
+            return match.group(1).strip() or None
+        if "/" not in raw:
+            return raw
+        return None
+
+    async def _resolve_pilot_if_userid(
+        self, pilot_data: Dict, pilot_label: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Return (ifuserid, ifc_username), resolving missing ifuserid via IFC if possible."""
+        ifuserid = str(pilot_data.get("ifuserid") or "").strip() or None
+        ifc_username = self._extract_ifc_username(pilot_data.get("ifc"))
+        if ifuserid or not ifc_username:
+            return ifuserid, ifc_username
+
+        if_api = getattr(self.bot, "if_api_manager", None)
+        if if_api is None or not hasattr(if_api, "get_user_by_ifc_username"):
+            return None, ifc_username
+
+        try:
+            user_data = await if_api.get_user_by_ifc_username(ifc_username)
+            resolved_id = (
+                str((user_data or {}).get("result", {}).get("userId") or "").strip()
+                if isinstance(user_data, dict)
+                else ""
+            )
+            if resolved_id:
+                ifuserid = resolved_id
+                pilot_data["ifuserid"] = resolved_id
+                pilots_model = getattr(self.bot, "pilots_model", None)
+                if pilots_model is not None:
+                    if hasattr(pilots_model, "update_ifuserid_by_id") and pilot_data.get("id"):
+                        await pilots_model.update_ifuserid_by_id(pilot_data["id"], resolved_id)
+                    elif hasattr(pilots_model, "update_ifuserid_by_ifc_username"):
+                        await pilots_model.update_ifuserid_by_ifc_username(ifc_username, resolved_id)
+                self.logger.info(
+                    "[FLEET-LIFTS] %s (callsign=%s): resolved missing ifuserid=%s via IFC username '%s'",
+                    pilot_label,
+                    pilot_data.get("callsign"),
+                    resolved_id,
+                    ifc_username,
+                )
+        except Exception as exc:
+            self.logger.warning(
+                "[FLEET-LIFTS] %s (callsign=%s): failed resolving ifuserid for IFC '%s': %s",
+                pilot_label,
+                pilot_data.get("callsign"),
+                ifc_username,
+                exc,
+            )
+
+        return ifuserid, ifc_username
+
+    async def _get_org_lifts_cache(self) -> Dict[str, Any]:
+        """Fetch 15-minute cached organization member lift counts from IF Live v3."""
+        org_id = os.getenv("IF_ORGANIZATION_ID", "").strip()
+        manager = getattr(self.bot, "if_live_manager", None)
+        if not org_id or manager is None:
+            reason = (
+                "IF_ORGANIZATION_ID not configured"
+                if not org_id
+                else "if_live_manager unavailable"
+            )
+            self.logger.warning(
+                "[FLEET-LIFTS] Org lift lookup unavailable (%s); defaulting pilots to 1.5x (%s)",
+                reason,
+                FLEET_NON_LIFT_MULTIPLIER,
+            )
+            return {
+                "success": False,
+                "cache_hit": False,
+                "cache_age_seconds": None,
+                "total_members": 0,
+                "members_with_lifts": 0,
+                "by_user_id": {},
+                "by_username": {},
+                "stale_fallback": False,
+                "error": reason,
+            }
+
+        if hasattr(manager, "get_organization_members_lifts"):
+            snapshot = await manager.get_organization_members_lifts(
+                org_id, pilot_id=IF_LIVE_TOKEN_OWNER_ID
+            )
+        elif hasattr(manager, "fleet_service") and hasattr(
+            manager.fleet_service, "get_organization_members_lifts"
+        ):
+            snapshot = await manager.fleet_service.get_organization_members_lifts(
+                org_id, pilot_id=IF_LIVE_TOKEN_OWNER_ID
+            )
+        else:
+            return {
+                "success": False,
+                "cache_hit": False,
+                "cache_age_seconds": None,
+                "total_members": 0,
+                "members_with_lifts": 0,
+                "by_user_id": {},
+                "by_username": {},
+                "stale_fallback": False,
+                "error": "IFLiveManager does not expose get_organization_members_lifts",
+            }
+
+        cache_age = snapshot.get("cache_age_seconds")
+        age_str = f"{cache_age:.1f}s" if isinstance(cache_age, (int, float)) else "n/a"
+        self.logger.info(
+            "[FLEET-LIFTS] Snapshot status: success=%s, cache_hit=%s, age=%s, total_members=%s, members_with_lifts=%s, stale_fallback=%s, error=%s",
+            snapshot.get("success"),
+            snapshot.get("cache_hit"),
+            age_str,
+            snapshot.get("total_members", 0),
+            snapshot.get("members_with_lifts", 0),
+            snapshot.get("stale_fallback", False),
+            snapshot.get("error"),
+        )
+        return snapshot
+
+    async def _resolve_pilot_lift_multiplier(
+        self,
+        pilot_data: Dict,
+        discord_id: int,
+        pilot_label: str,
+        lifts_snapshot: Optional[Dict[str, Any]],
+        explicit_multiplier: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Determine a single pilot's fleet multiplier (2x with active org lift, else 1.5x)."""
+        callsign = pilot_data.get("callsign")
+        pilot_id = pilot_data.get("id")
+
+        if explicit_multiplier is not None and str(explicit_multiplier).strip():
+            mult_code = str(explicit_multiplier).strip()
+            mult_label = "2x" if mult_code == FLEET_LIFT_MULTIPLIER else "1.5x"
+            self.logger.info(
+                "[FLEET-LIFTS] %s (discord_id=%s, pilot_id=%s, callsign=%s): using explicit multiplier=%s (%s)",
+                pilot_label,
+                discord_id,
+                pilot_id,
+                callsign,
+                mult_label,
+                mult_code,
+            )
+            return {
+                "multiplier": mult_code,
+                "multiplier_label": mult_label,
+                "active_lifts": None,
+                "has_active_lift": mult_code == FLEET_LIFT_MULTIPLIER,
+                "lift_status": "manual",
+                "lift_note": None,
+            }
+
+        ifuserid, ifc_username = await self._resolve_pilot_if_userid(pilot_data, pilot_label)
+
+        if not lifts_snapshot or not lifts_snapshot.get("success"):
+            err = (lifts_snapshot or {}).get("error") or "IF Live members cache unavailable"
+            self.logger.warning(
+                "[FLEET-LIFTS] %s (discord_id=%s, pilot_id=%s, callsign=%s, ifuserid=%s): lookup failed (%s) -> fallback 1.5x (%s)",
+                pilot_label,
+                discord_id,
+                pilot_id,
+                callsign,
+                ifuserid,
+                err,
+                FLEET_NON_LIFT_MULTIPLIER,
+            )
+            return {
+                "multiplier": FLEET_NON_LIFT_MULTIPLIER,
+                "multiplier_label": "1.5x",
+                "active_lifts": None,
+                "has_active_lift": False,
+                "lift_status": "lookup_failed",
+                "lift_note": "IF Live lift check unavailable; defaulted to 1.5x",
+            }
+
+        by_uid = lifts_snapshot.get("by_user_id") or {}
+        by_uname = lifts_snapshot.get("by_username") or {}
+        member = by_uid.get(ifuserid.lower()) if ifuserid else None
+        match_via = "ifuserid" if member else None
+
+        if member is None and not ifuserid and ifc_username:
+            member = by_uname.get(ifc_username.lower())
+            if member is not None:
+                match_via = "ifc_username"
+
+        if member is not None:
+            active_lifts = int(member.get("active_lifts", 0) or 0)
+            has_lift = active_lifts > 0
+            mult_code = FLEET_LIFT_MULTIPLIER if has_lift else FLEET_NON_LIFT_MULTIPLIER
+            mult_label = "2x" if has_lift else "1.5x"
+            self.logger.info(
+                "[FLEET-LIFTS] %s (discord_id=%s, pilot_id=%s, callsign=%s, ifuserid=%s, if_username=%s): matched via %s -> active_lifts=%d -> multiplier=%s (%s)",
+                pilot_label,
+                discord_id,
+                pilot_id,
+                callsign,
+                member.get("user_id") or ifuserid,
+                member.get("username"),
+                match_via,
+                active_lifts,
+                mult_label,
+                mult_code,
+            )
+            return {
+                "multiplier": mult_code,
+                "multiplier_label": mult_label,
+                "active_lifts": active_lifts,
+                "has_active_lift": has_lift,
+                "lift_status": "matched",
+                "lift_note": None,
+            }
+
+        if not ifuserid:
+            self.logger.warning(
+                "[FLEET-LIFTS] %s (discord_id=%s, pilot_id=%s, callsign=%s, ifc=%s): no ifuserid linked -> defaulting to 1.5x (%s)",
+                pilot_label,
+                discord_id,
+                pilot_id,
+                callsign,
+                ifc_username,
+                FLEET_NON_LIFT_MULTIPLIER,
+            )
+            return {
+                "multiplier": FLEET_NON_LIFT_MULTIPLIER,
+                "multiplier_label": "1.5x",
+                "active_lifts": 0,
+                "has_active_lift": False,
+                "lift_status": "missing_ifuserid",
+                "lift_note": "No IF account linked; defaulted to 1.5x",
+            }
+
+        self.logger.info(
+            "[FLEET-LIFTS] %s (discord_id=%s, pilot_id=%s, callsign=%s, ifuserid=%s): not found in org members (%d total) -> active_lifts=0 -> multiplier=1.5x (%s)",
+            pilot_label,
+            discord_id,
+            pilot_id,
+            callsign,
+            ifuserid,
+            lifts_snapshot.get("total_members", 0),
+            FLEET_NON_LIFT_MULTIPLIER,
+        )
+        return {
+            "multiplier": FLEET_NON_LIFT_MULTIPLIER,
+            "multiplier_label": "1.5x",
+            "active_lifts": 0,
+            "has_active_lift": False,
+            "lift_status": "not_org_member",
+            "lift_note": "Not found in IF org member list; defaulted to 1.5x",
+        }
+
+    @staticmethod
+    def _fleet_lift_result_fields(lift_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract lift metadata fields attached to each pilot PIREP result."""
+        return {
+            "multiplier": lift_info["multiplier"],
+            "multiplier_label": lift_info["multiplier_label"],
+            "active_lifts": lift_info["active_lifts"],
+            "has_active_lift": lift_info["has_active_lift"],
+            "lift_status": lift_info["lift_status"],
+            "lift_note": lift_info.get("lift_note"),
+        }
+
     async def submit_fleet_pirep(
         self, 
         pilot1_discord_id: int, 
@@ -249,7 +522,9 @@ class PirepFilingService:
         total_duration_minutes: int,
         pilot1_name: str = None,
         pilot2_name: str = None,
-        multiplier: str = "150000"
+        multiplier: Optional[str] = None,
+        pilot1_multiplier: Optional[str] = None,
+        pilot2_multiplier: Optional[str] = None,
     ) -> Dict:
         """
         Submits dual-pilot PIREP with 50/50 hour split.
@@ -264,7 +539,9 @@ class PirepFilingService:
             total_duration_minutes: Total flight minutes
             pilot1_name: Discord display name of Pilot 1 (fallback if DB name is None)
             pilot2_name: Discord display name of Pilot 2 (fallback if DB name is None)
-            multiplier: Multiplier code ("150000" for 1.5x or "200000" for 2x)
+            multiplier: Optional shared multiplier override ("150000" or "200000"). When omitted, resolves per pilot via IF activeLifts.
+            pilot1_multiplier: Optional multiplier override for Pilot 1 only.
+            pilot2_multiplier: Optional multiplier override for Pilot 2 only.
         
         Returns:
             Dict with success status and results
@@ -276,9 +553,19 @@ class PirepFilingService:
             'error': None
         }
         
-        # Hardcoded aircraft_id, configurable multiplier (defaults to 150000)
+        # Hardcoded aircraft_id = 11; per-pilot multipliers default to cached IF org activeLifts detection
         aircraft_id = 11
-        multiplier = str(multiplier or "150000")
+        p1_override = (
+            str(pilot1_multiplier).strip()
+            if pilot1_multiplier is not None and str(pilot1_multiplier).strip()
+            else (str(multiplier).strip() if multiplier is not None and str(multiplier).strip() else None)
+        )
+        p2_override = (
+            str(pilot2_multiplier).strip()
+            if pilot2_multiplier is not None and str(pilot2_multiplier).strip()
+            else (str(multiplier).strip() if multiplier is not None and str(multiplier).strip() else None)
+        )
+        result['lift_lookup_warning'] = None
         
         # Calculate duration string
         total_minutes = (total_duration_hours * 60) + total_duration_minutes
@@ -309,7 +596,7 @@ class PirepFilingService:
         frame_name = frame_data.get('name')
         
         # Use hardcoded aircraft_id = 11 for all fleet PIREPs
-        # Use hardcoded multiplier = 150000 for all fleet PIREPs
+        # Resolve per-pilot multipliers from 15-minute cached IF org activeLifts (1.5x / 2x)
         
         # Get Pilot 1 data
         pilot1_data = await self.bot.pilots_model.get_pilot_by_discord_id(str(pilot1_discord_id))
@@ -317,6 +604,21 @@ class PirepFilingService:
             result['error'] = "Pilot 1 not found in database. Please link their account."
             return result
         
+        # Submit PIREP for Pilot 1
+        lifts_snapshot = None
+        if p1_override is None or (pilot2_discord_id and p2_override is None):
+            lifts_snapshot = await self._get_org_lifts_cache()
+            if not lifts_snapshot.get("success") and lifts_snapshot.get("error"):
+                result["lift_lookup_warning"] = lifts_snapshot["error"]
+
+        p1_lift = await self._resolve_pilot_lift_multiplier(
+            pilot1_data,
+            pilot1_discord_id,
+            "Pilot 1",
+            lifts_snapshot,
+            explicit_multiplier=p1_override,
+        )
+
         # Submit PIREP for Pilot 1
         pilot1_duration = f"{pilot1_hours:02d}:{pilot1_minutes:02d}"
         try:
@@ -329,19 +631,21 @@ class PirepFilingService:
                 date=datetime.now().strftime("%Y-%m-%d"),
                 aircraft_id=aircraft_id,  # Always 11
                 fuel_used=0,
-                multiplier=multiplier  # Always 150000
+                multiplier=p1_lift["multiplier"]
             )
             result['pilot1_result'] = {
                 'success': pilot1_response and pilot1_response.get('status') == 0,
                 'pilot_name': pilot1_name,  # Always use Discord name
                 'duration': pilot1_duration,
-                'response': pilot1_response
+                'response': pilot1_response,
+                **self._fleet_lift_result_fields(p1_lift)
             }
         except Exception as e:
             self.logger.error(f"Error submitting PIREP for Pilot 1: {e}")
             result['pilot1_result'] = {
                 'success': False,
                 'pilot_name': pilot1_name or "Unknown",
+                **self._fleet_lift_result_fields(p1_lift),
                 'duration': pilot1_duration,
                 'error': str(e)
             }
@@ -356,6 +660,13 @@ class PirepFilingService:
                     'error': "Pilot 2 not found in database"
                 }
             else:
+                p2_lift = await self._resolve_pilot_lift_multiplier(
+                    pilot2_data,
+                    pilot2_discord_id,
+                    "Pilot 2",
+                    lifts_snapshot,
+                    explicit_multiplier=p2_override,
+                )
                 pilot2_duration = f"{pilot2_hours:02d}:{pilot2_minutes:02d}"
                 try:
                     pilot2_response = await self.bot.cc_api_manager.submit_pirep(
@@ -367,19 +678,21 @@ class PirepFilingService:
                         date=datetime.now().strftime("%Y-%m-%d"),
                         aircraft_id=aircraft_id,  # Always 11
                         fuel_used=0,
-                        multiplier=multiplier  # Always 150000
+                        multiplier=p2_lift["multiplier"]
                     )
                     result['pilot2_result'] = {
                         'success': pilot2_response and pilot2_response.get('status') == 0,
                         'pilot_name': pilot2_name,  # Always use Discord name
                         'duration': pilot2_duration,
-                        'response': pilot2_response
+                        'response': pilot2_response,
+                        **self._fleet_lift_result_fields(p2_lift)
                     }
                 except Exception as e:
                     self.logger.error(f"Error submitting PIREP for Pilot 2: {e}")
                     result['pilot2_result'] = {
                         'success': False,
                         'pilot_name': pilot2_name or "Unknown",
+                        **self._fleet_lift_result_fields(p2_lift),
                         'duration': pilot2_duration,
                         'error': str(e)
                     }

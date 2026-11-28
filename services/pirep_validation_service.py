@@ -384,7 +384,7 @@ class PirepValidationService:
 
         try:
             route_valid = await self.check_route_database(pirep['departure'], pirep['arrival'], pirep.get('flightnum'), pirep.get('pilotid'))
-            route_exists = await self.check_route_exists(pirep['departure'], pirep['arrival'], pirep.get('pilotid'))
+            route_exists = await self.check_route_exists(pirep['departure'], pirep['arrival'], pirep.get('pilotid'), flight_num=pirep.get('flightnum'))
             
             # Check if it's an OWD route
             is_owd_route = False
@@ -825,8 +825,35 @@ class PirepValidationService:
         """Check if pilot has OneWorld rank or above"""
         return await self.bot.rank_model.is_owd_eligible(pilot_id)
 
+    async def _is_valid_christmas_flight(self, departure: str, arrival: str, flight_num: Optional[str]) -> bool:
+        """Verify whether flight_num is an active/valid Christmas Ops 2026 dispatch leg."""
+        if not flight_num:
+            return False
+        from services.christmas_service import ChristmasService
+        parsed = ChristmasService.parse_christmas_flightnum(flight_num)
+        if not parsed:
+            return False
+        reg, dispatch_code, leg_number = parsed
+        christmas_model = getattr(self.bot, "christmas_model", None)
+        if christmas_model is None:
+            return False
+        try:
+            leg = await christmas_model.get_leg_by_dispatch_and_number(dispatch_code, leg_number)
+        except Exception as exc:
+            logger.warning("Christmas route check failed: %s", exc)
+            return False
+        if not leg or leg.get("status") == "CANCELLED":
+            return False
+        return (
+            str(leg.get("origin_icao") or "").upper() == str(departure or "").upper()
+            and str(leg.get("destination_icao") or "").upper() == str(arrival or "").upper()
+            and str(leg.get("registration") or "").replace("-", "").upper() == reg.replace("-", "").upper()
+        )
+
     async def check_route_database(self, departure, arrival, flight_num, pilot_id=None):
         """Check if the flight number exists in the routes database or OWD routes."""
+        if await self._is_valid_christmas_flight(departure, arrival, flight_num):
+            return True
         if not flight_num:
             return False
         
@@ -846,8 +873,12 @@ class PirepValidationService:
             print(f"Error checking route database: {e}")
             return False
     
-    async def check_route_exists(self, departure, arrival, pilot_id=None):
+    async def check_route_exists(self, departure, arrival, pilot_id=None, flight_num=None):
         """Check if the route exists in the database or OWD routes."""
+
+        if await self._is_valid_christmas_flight(departure, arrival, flight_num):
+            return True
+
         try:
             route_data = await self.bot.routes_model.find_route_by_icao(departure, arrival)
             if route_data:

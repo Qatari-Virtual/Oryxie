@@ -25,6 +25,7 @@ from database.if_live_tokens_model import IFLiveTokensModel
 from database.stopped_flight_model import StoppedFlightModel
 from database.reengagement_model import ReengagementModel
 from database.checkride_model import CheckrideModel
+from database.christmas_model import ChristmasModel
 try:
     from services.ai_service import AIService
 except ImportError:
@@ -38,6 +39,8 @@ from services.simbrief_service import SimBriefService
 from services.flight_board_service import FlightBoardService
 from services.pirep_filing_service import PirepFilingService
 from services.fleet_service import FleetService
+from services.boarding_pass_service import BoardingPassService
+from services.christmas_service import ChristmasService
 
 load_dotenv()
 
@@ -64,6 +67,7 @@ class MyBot(commands.Bot):
         self.stopped_flight_model: StoppedFlightModel = None
         self.reengagement_model: ReengagementModel = None
         self.checkride_model: CheckrideModel = None
+        self.christmas_model: ChristmasModel = None
         self.flightdata: FlightData = None
         # VA Data Models
         self.rank_model: RankModel = None
@@ -86,6 +90,8 @@ class MyBot(commands.Bot):
         self.flight_board_service: FlightBoardService = None
         self.pirep_filing_service: PirepFilingService = None
         self.fleet_service: FleetService = None
+        self.boarding_pass_service: BoardingPassService = None
+        self.christmas_service: ChristmasService = None
 
     async def setup_hook(self):
         """
@@ -105,6 +111,7 @@ class MyBot(commands.Bot):
         self.stopped_flight_model = StoppedFlightModel(self.db_manager)
         self.reengagement_model = ReengagementModel(self.db_manager)
         self.checkride_model = CheckrideModel(self.db_manager)
+        self.christmas_model = ChristmasModel(self.db_manager)
         
         # Initialize VA Data Models
         self.rank_model = RankModel(self.db_manager)
@@ -124,6 +131,8 @@ class MyBot(commands.Bot):
         self.flight_board_service = FlightBoardService(self)
         self.pirep_filing_service = PirepFilingService(self)
         self.fleet_service = FleetService(self)
+        self.boarding_pass_service = BoardingPassService()
+        self.christmas_service = ChristmasService(self)
         self.auto_pirep_service = None  # Lazy loaded in cog
         print("DatabaseManager, FlightData, and Services instances created.")
         
@@ -204,6 +213,7 @@ class MyBot(commands.Bot):
             "cogs.potw_lotw_message",
             "cogs.activity_check",
             "cogs.checkride_tracker",
+            "cogs.christmas_operations",
         )
         loaded_extensions = []
         for extension in extensions:

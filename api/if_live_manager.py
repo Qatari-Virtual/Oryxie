@@ -383,7 +383,7 @@ def generate_code_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-DEFAULT_SCOPES = "openid profile offline_access live:organizations.read live:aircraft.read live:schedules.read live:schedules.write"
+DEFAULT_SCOPES = "openid profile offline_access live:organizations.read live:members.read live:aircraft.read live:schedules.read live:schedules.write"
 
 
 class IFLiveClient:
@@ -704,5 +704,13 @@ class IFLiveManager:
     async def get_live_fleet(self, organization_id: str | None = None, force_refresh: bool = False, pilot_id: int = 1):
         """Fetch or return cached snapshot of the organization's fleet states."""
         return await self.fleet_service.get_live_fleet(organization_id, force_refresh=force_refresh, pilot_id=pilot_id)
+
+    async def get_organization_members_lifts(self, organization_id: str | None = None, force_refresh: bool = False, pilot_id: int = 1):
+        """Fetch or return 15-minute cached organization member lift counts."""
+        return await self.fleet_service.get_organization_members_lifts(
+            organization_id,
+            force_refresh=force_refresh,
+            pilot_id=pilot_id,
+        )
 
 

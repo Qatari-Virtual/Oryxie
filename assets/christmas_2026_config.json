@@ -1,0 +1,97 @@
+{
+  "event_name": "christmas_2026",
+  "ticket_currency_name": "ChristmasTickets",
+  "cookie_currency_name": "Cookies",
+  "ticket_to_cookie_rate": 1,
+  "hub_icao": "OTHH",
+  "hub_coords": {
+    "latitude": 25.2731,
+    "longitude": 51.6081
+  },
+  "hub_parked_radius_nm": 10.0,
+  "target_pax": 5000,
+  "west_min_pool_ratio": 0.90,
+  "max_active_dispatches_per_pilot": 2,
+  "live_board_channel_id": 1575539152961798369,
+  "pirep_aircraft_id": 11,
+  "ticket_per_pax": 1,
+  "pirep_multiplier": "300000",
+  "pirep_multiplier_label": "3x",
+  "east_airports": {
+    "WSSS": "Singapore",
+    "VTBS": "Bangkok",
+    "VTSP": "Phuket",
+    "RJAA": "Tokyo Narita",
+    "RKSI": "Seoul Incheon",
+    "YSSY": "Sydney",
+    "YMML": "Melbourne",
+    "YBBN": "Brisbane",
+    "VABB": "Mumbai",
+    "VIDP": "Delhi",
+    "VOBL": "Bengaluru"
+  },
+  "west_airports": {
+    "KJFK": "New York",
+    "KMIA": "Miami",
+    "KLAX": "Los Angeles",
+    "KSFO": "San Francisco",
+    "KIAH": "Houston",
+    "KDFW": "Dallas/Fort Worth",
+    "KATL": "Atlanta",
+    "KORD": "Chicago",
+    "KIAD": "Washington Dulles",
+    "KBOS": "Boston",
+    "CYUL": "Montreal",
+    "CYYZ": "Toronto",
+    "SKBO": "Bogota",
+    "SBGR": "Sao Paulo",
+    "EGLL": "London Heathrow",
+    "LFPG": "Paris CDG",
+    "LEMD": "Madrid",
+    "LEBL": "Barcelona",
+    "LIRF": "Rome"
+  },
+  "aircraft_capacities": {
+    "A388": 517,
+    "B77W": 412,
+    "A35K": 395,
+    "A333": 305,
+    "A359": 283,
+    "B77L": 276,
+    "B788": 267,
+    "B787": 267,
+    "A21N": 236,
+    "A321": 182,
+    "A320": 144
+  },
+  "icao_aliases": {
+    "B787": "B788",
+    "B788": "B787"
+  },
+  "excluded_registrations": [
+    "A7BFA",
+    "A7-BFA",
+    "A7BFC",
+    "A7-BFC"
+  ],
+  "ui_branding": {
+    "board_title": "🎄 QRV CHRISTMAS OPERATIONS 2026",
+    "board_banner_url": "",
+    "board_thumbnail_url": "",
+    "board_color_hex": "#8A1538",
+    "east_color_hex": "#1E7E34",
+    "west_color_hex": "#1F6FEB",
+    "boarding_pass": {
+      "background_hex": "#120810",
+      "card_hex": "#F8F4F6",
+      "header_hex": "#8A1538",
+      "accent_gold_hex": "#D4AF37",
+      "accent_green_hex": "#1E7E34",
+      "accent_blue_hex": "#1F6FEB",
+      "text_dark_hex": "#1A1116",
+      "text_light_hex": "#FFFFFF",
+      "text_muted_hex": "#6E5A65",
+      "logo_path": ""
+    }
+  }
+}

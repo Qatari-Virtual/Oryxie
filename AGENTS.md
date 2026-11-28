@@ -107,3 +107,9 @@ Oryxie enforces a strict multi-tier architecture. Never blur layer boundaries:
      pytest
      ```
    - Write unit tests in `tests/` for new business logic or bug fixes using mocks for external APIs and Discord objects.
+6. **Persistent Task & Progress Logging (Markdown Handoff)**:
+   - When working on any multi-step feature, epic, or plan (such as files in `docs/*-plan.md`), continuously record everything you do in a Markdown tracking file so a fresh conversation can resume with full history if the current chat overloads.
+   - Update the active plan/progress `.md` file in `docs/` (or create `docs/<feature>-progress.md` if none exists) **after each completed task/module and before finishing your turn**:
+     - Check off completed checklist items (`- [x]`).
+     - Append a chronological entry under a **Progress & Execution Log** section listing: exact files created or modified, key classes/methods/config added, design decisions or edge cases handled, test commands run and their results, and the exact next remaining task or blocker.
+   - Never leave completed work undocumented only in chat history.

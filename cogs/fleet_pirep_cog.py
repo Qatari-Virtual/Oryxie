@@ -29,6 +29,45 @@ def _get(obj, key, default=None):
     return getattr(obj, key, default)
 
 
+def _format_fleet_multiplier_summary(result: dict) -> str:
+    """Summarize the awarded fleet multipliers for single or dual-pilot submissions."""
+    p1 = result.get("pilot1_result") or {}
+    p2 = result.get("pilot2_result")
+    p1_label = p1.get("multiplier_label") or ("2x" if p1.get("multiplier") == "200000" else "1.5x")
+    if p2 and (p2.get("multiplier") or p2.get("multiplier_label")):
+        p2_label = p2.get("multiplier_label") or ("2x" if p2.get("multiplier") == "200000" else "1.5x")
+        if p1_label == p2_label:
+            return f"{p1_label} (Both Pilots)"
+        return f"P1: {p1_label} · P2: {p2_label}"
+    return f"{p1_label} (Active Lift)" if p1.get("has_active_lift") else f"{p1_label} (No Active Lift)"
+
+
+def _format_pilot_pirep_value(pilot_result: dict) -> str:
+    """Format a pilot's PIREP result line including awarded multiplier and active lift info."""
+    status = "✅" if pilot_result.get("success") else "❌"
+    name = pilot_result.get("pilot_name", "Unknown")
+    duration = pilot_result.get("duration", "N/A")
+    has_mult = bool(pilot_result.get("multiplier") or pilot_result.get("multiplier_label"))
+    mult = pilot_result.get("multiplier_label") or (
+        "2x" if pilot_result.get("multiplier") == "200000" else "1.5x"
+    )
+    active_lifts = pilot_result.get("active_lifts")
+    lift_note = pilot_result.get("lift_note")
+
+    if active_lifts is not None and pilot_result.get("lift_status") == "matched":
+        lift_suffix = f" ({active_lifts} active {'lift' if active_lifts == 1 else 'lifts'})"
+    elif lift_note:
+        lift_suffix = f" ({lift_note})"
+    else:
+        lift_suffix = ""
+
+    mult_part = f" · **{mult}**{lift_suffix}" if has_mult else ""
+    line = f"{status} {name} - {duration} hours{mult_part}"
+    if not pilot_result.get("success") and pilot_result.get("error"):
+        line += f"\n└ Error: {pilot_result['error']}"
+    return line
+
+
 def load_fleet_frames():
     """Fallback: Load fleet frames from JSON file if IF Live is unavailable."""
     try:
@@ -39,9 +78,10 @@ def load_fleet_frames():
         logger.error(f"Error loading fallback fleet frames: {e}")
     return {}
 
+
 class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
     """Modal for entering fleet flight details."""
-    
+
     departure = discord.ui.TextInput(
         label="Departure ICAO",
         placeholder="e.g., OTHH",
@@ -49,7 +89,7 @@ class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
         max_length=4,
         min_length=4
     )
-    
+
     arrival = discord.ui.TextInput(
         label="Arrival ICAO",
         placeholder="e.g., EGLL",
@@ -57,22 +97,22 @@ class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
         max_length=4,
         min_length=4
     )
-    
+
     hours = discord.ui.TextInput(
         label="Flight Duration Hours (HH)",
         placeholder="e.g., 07",
         required=True,
         max_length=2
     )
-    
+
     minutes = discord.ui.TextInput(
         label="Flight Duration Minutes (MM)",
         placeholder="e.g., 30",
         required=True,
         max_length=2
     )
-    
-    def __init__(self, cog, frame_name: str, frame_data: dict, pilot1_id: int, pilot2_id: Optional[int], pilot1_name: str = None, pilot2_name: str = None, multiplier: str = "150000"):
+
+    def __init__(self, cog, frame_name: str, frame_data: dict, pilot1_id: int, pilot2_id: Optional[int], pilot1_name: str = None, pilot2_name: str = None, multiplier: Optional[str] = None):
         super().__init__()
         self.cog = cog
         self.frame_name = frame_name
@@ -82,21 +122,21 @@ class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
         self.pilot1_name = pilot1_name  # Discord member display name
         self.pilot2_name = pilot2_name  # Discord member display name
         self.multiplier = multiplier
-        
+
         # Add frame name to frame_data for the service
         self.frame_data['name'] = frame_name
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        
+
         # Validate ICAOs
         dep_icao = self.departure.value.upper()
         arr_icao = self.arrival.value.upper()
-        
+
         if len(dep_icao) != 4 or len(arr_icao) != 4:
             await interaction.followup.send("❌ Invalid ICAO code. Must be 4 characters.", ephemeral=True)
             return
-        
+
         # Validate and parse duration
         try:
             hours = int(self.hours.value)
@@ -106,7 +146,22 @@ class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
         except ValueError:
             await interaction.followup.send("❌ Invalid time format. Hours: 0-99, Minutes: 0-59", ephemeral=True)
             return
-        
+
+        logger.info(
+            "[FLEET-PIREP] Modal submitted by %s (%s): frame=%s, route=%s->%s, duration=%02d:%02d, pilot_1=%s (%s), pilot_2=%s (%s)",
+            interaction.user.display_name,
+            interaction.user.id,
+            self.frame_name,
+            dep_icao,
+            arr_icao,
+            hours,
+            minutes,
+            self.pilot1_name,
+            self.pilot1_id,
+            self.pilot2_name,
+            self.pilot2_id,
+        )
+
         # Submit fleet PIREP
         try:
             pirep_service = self.cog._get_pirep_service()
@@ -120,48 +175,54 @@ class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
                 total_duration_minutes=minutes,
                 pilot1_name=self.pilot1_name,
                 pilot2_name=self.pilot2_name,
-                multiplier=self.multiplier
+                multiplier=self.multiplier,
             )
-            
+
             if result.get('error'):
                 await interaction.followup.send(f"❌ Error: {result['error']}", ephemeral=True)
                 return
-            
-            # Build success embed
+
+            # Build result embed
+            overall_success = bool(result.get('success'))
             embed = discord.Embed(
-                title="✅ Fleet PIREP Filed Successfully!",
-                color=0x00FF00
+                title="✅ Fleet PIREP Filed Successfully!" if overall_success else "⚠️ Fleet PIREP Submission Had Errors",
+                color=0x00FF00 if overall_success else 0xFFA500
             )
-            
+
             total_duration = f"{hours:02d}:{minutes:02d}"
-            multiplier_label = "2x (Lift Users)" if self.multiplier == "200000" else "1.5x (Non-Lift Users)"
+            multiplier_label = _format_fleet_multiplier_summary(result)
             embed.add_field(name="✈️ Flight", value=f"{self.frame_name} ({dep_icao} → {arr_icao})", inline=False)
             embed.add_field(name="⏱️ Total Duration", value=total_duration, inline=True)
             embed.add_field(name="✨ Multiplier", value=multiplier_label, inline=True)
-            
+
             # Pilot 1 result
             p1_result = result.get('pilot1_result')
             if p1_result:
-                p1_status = "✅" if p1_result.get('success') else "❌"
                 embed.add_field(
-                    name=f"👤 Pilot 1",
-                    value=f"{p1_status} {p1_result.get('pilot_name', 'Unknown')} - {p1_result.get('duration', 'N/A')} hours",
+                    name="👤 Pilot 1",
+                    value=_format_pilot_pirep_value(p1_result),
                     inline=False
                 )
-            
+
             # Pilot 2 result (if exists)
             if self.pilot2_id:
                 p2_result = result.get('pilot2_result')
                 if p2_result:
-                    p2_status = "✅" if p2_result.get('success') else "❌"
                     embed.add_field(
-                        name=f"👤 Pilot 2",
-                        value=f"{p2_status} {p2_result.get('pilot_name', 'Unknown')} - {p2_result.get('duration', 'N/A')} hours",
+                        name="👤 Pilot 2",
+                        value=_format_pilot_pirep_value(p2_result),
                         inline=False
                     )
-            
+
+            if result.get('lift_lookup_warning'):
+                embed.add_field(
+                    name="⚠️ Lift Lookup Notice",
+                    value=f"Could not verify org lifts (`{result['lift_lookup_warning']}`); defaulted to 1.5x.",
+                    inline=False
+                )
+
             await interaction.followup.send(embed=embed, ephemeral=True)
-            
+
         except Exception as e:
             logger.error(f"Error submitting fleet PIREP: {e}")
             await interaction.followup.send(f"❌ Error submitting PIREP: {str(e)}", ephemeral=True)
@@ -169,14 +230,14 @@ class FleetPirepModal(discord.ui.Modal, title="Fleet Flight Details"):
 
 class FleetPirepCog(commands.Cog):
     """Cog for handling fleet PIREP filing commands."""
-    
+
     def __init__(self, bot):
         self.bot = bot
         self.fleet_frames: Dict[str, dict] = load_fleet_frames()
         self._fleet_at = 0.0
         self._fleet_lock = asyncio.Lock()
         self._pirep_service = None
-    
+
     def _get_pirep_service(self):
         """Get or create PirepFilingService instance."""
         if self._pirep_service is None:
@@ -246,12 +307,12 @@ class FleetPirepCog(commands.Cog):
                     self.fleet_frames = load_fleet_frames()
 
             return self.fleet_frames
-    
+
     async def frame_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         """Autocomplete for fleet frames with full data from IF Live + DB."""
         frames_map = await self._get_live_fleet_frames()
         frames = list(frames_map.keys())
-        
+
         # Filter by frame name, ICAO, or livery
         if current:
             query = current.upper()
@@ -261,7 +322,7 @@ class FleetPirepCog(commands.Cog):
                 or query in frames_map[f].get('icao', '').upper()
                 or query in frames_map[f].get('livery', '').upper()
             ]
-        
+
         # Build choices with full data: "FRAME (ICAO - Livery)"
         choices = []
         for frame in frames[:25]:
@@ -270,35 +331,27 @@ class FleetPirepCog(commands.Cog):
             livery = frame_data.get('livery', 'N/A')
             display_name = f"{frame} ({icao} - {livery})"
             choices.append(app_commands.Choice(name=display_name[:100], value=frame))
-        
+
         return choices
-    
-    @app_commands.command(name="live_fleet_pirep", description="File a dual-pilot PIREP for fleet flights")
+
+    @app_commands.command(name="live_fleet_pirep", description="File a fleet PIREP with automatic org lift multiplier detection")
     @app_commands.checks.has_any_role(*ALLOWED_ROLE_IDS)
     @app_commands.autocomplete(frame=frame_autocomplete)
     @app_commands.describe(
         frame="Select the aircraft registration",
-        multiplier="1.5x for non-lift users, 2x for lift users",
         pilot_1="Primary pilot",
         pilot_2="Second pilot (optional, splits flight time 50/50)",
     )
-    @app_commands.choices(
-        multiplier=[
-            app_commands.Choice(name="1.5x (For Non-Lift Users)", value="150000"),
-            app_commands.Choice(name="2x (For Lift Users)", value="200000"),
-        ]
-    )
     async def live_fleet_pirep(
-        self, 
+        self,
         interaction: discord.Interaction,
         frame: str,
-        multiplier: app_commands.Choice[str],
         pilot_1: discord.Member,
         pilot_2: discord.Member = None
     ):
-        """File a fleet PIREP with optional dual pilot split."""
+        """File a fleet PIREP with optional dual pilot split and automatic org lift multipliers."""
         frames_map = await self._get_live_fleet_frames()
-        
+
         # Match frame case-insensitively
         matched_key = next(
             (k for k in frames_map if k.upper() == frame.strip().upper()),
@@ -307,28 +360,27 @@ class FleetPirepCog(commands.Cog):
         if not matched_key:
             await interaction.response.send_message("❌ Invalid frame selected.", ephemeral=True)
             return
-        
+
         # Validate pilot 1
         if not pilot_1:
             await interaction.response.send_message("❌ Pilot 1 is required.", ephemeral=True)
             return
-        
+
         # Validate pilots are different
         if pilot_2 and pilot_1.id == pilot_2.id:
             await interaction.response.send_message("❌ Cannot select the same pilot for both positions.", ephemeral=True)
             return
-        
+
         # Get frame data (copy so modal mutation doesn't alter cache)
         frame_data = dict(frames_map[matched_key])
-        
+
         # Get Discord IDs and display names directly from Member objects
         pilot1_id = pilot_1.id
         pilot1_name = pilot_1.display_name
         pilot2_id = pilot_2.id if pilot_2 else None
         pilot2_name = pilot_2.display_name if pilot_2 else None
-        selected_multiplier = multiplier.value if multiplier else "150000"
-        
-        # Send modal
+
+        # Send modal (lift status and per-pilot multipliers are resolved after modal submit)
         modal = FleetPirepModal(
             self,
             matched_key,
@@ -337,7 +389,7 @@ class FleetPirepCog(commands.Cog):
             pilot2_id,
             pilot1_name,
             pilot2_name,
-            multiplier=selected_multiplier,
+            multiplier=None,
         )
         await interaction.response.send_modal(modal)
 
@@ -353,132 +405,133 @@ class FleetPirepCog(commands.Cog):
             if not interaction.response.is_done():
                 await interaction.response.send_message(f"❌ Error: {error}", ephemeral=True)
 
-    @app_commands.command(name="acars_live", description="Automatically file a fleet PIREP from your latest Infinite Flight flight")
-    @app_commands.checks.has_any_role(*ALLOWED_ROLE_IDS)
-    @app_commands.autocomplete(frame=frame_autocomplete)
-    async def acars_live(
-        self,
-        interaction: discord.Interaction,
-        frame: Optional[str] = None,
-        copilot: Optional[discord.Member] = None,
-    ):
-        """Automatically file a fleet PIREP using your latest Infinite Flight logbook flight."""
-        await interaction.response.defer(ephemeral=True)
-
-        if copilot and copilot.id == interaction.user.id:
-            await interaction.followup.send("Cannot select yourself as the co-pilot.", ephemeral=True)
-            return
-
-        pirep_service = self._get_pirep_service()
-        result = await pirep_service.fetch_if_flights(interaction.user.id)
-        if not result or not result.get("success"):
-            err = (result or {}).get("error") or "Could not fetch recent flights from Infinite Flight."
-            await interaction.followup.send(f"Error: {err}", ephemeral=True)
-            return
-
-        flights = result.get("flights") or []
-        if not flights:
-            await interaction.followup.send(
-                "No recent flights found in your Infinite Flight logbook. Please allow 1-2 minutes for Infinite Flight to sync and try again.",
-                ephemeral=True,
-            )
-            return
-
-        latest = flights[0]
-        dep_icao = str(latest.get("departure") or "").upper()
-        arr_icao = str(latest.get("arrival") or "").upper()
-        duration_str = latest.get("duration") or "00:00"
-
-        try:
-            parts = duration_str.split(":")
-            hours = int(parts[0])
-            minutes = int(parts[1])
-        except (ValueError, IndexError):
-            hours = 0
-            minutes = 0
-
-        frames_map = await self._get_live_fleet_frames()
-        matched_key = None
-        if frame:
-            matched_key = next(
-                (k for k in frames_map if k.upper() == frame.strip().upper()),
-                None,
-            )
-            if not matched_key:
-                await interaction.followup.send(f"Invalid frame selected: {frame}", ephemeral=True)
-                return
-        else:
-            monitor = self.bot.get_cog("StoppedFlightMonitor")
-            if monitor and hasattr(monitor, "_live_flight_trackers"):
-                for aid, trk in monitor._live_flight_trackers.items():
-                    if str(trk.get("discord_user_id")) == str(interaction.user.id):
-                        matched_key = trk.get("registration")
-                        break
-
-        if not matched_key:
-            await interaction.followup.send(
-                f"Detected latest flight: **{dep_icao}** -> **{arr_icao}** ({duration_str}).\n"
-                "Please specify which fleet frame you flew using `/acars_live frame:<REG>` (e.g. `frame:A7-BAE`).",
-                ephemeral=True,
-            )
-            return
-
-        frame_data = dict(frames_map.get(matched_key, {"name": matched_key}))
-        frame_data["name"] = matched_key
-
-        pilot2_id = copilot.id if copilot else None
-        pilot2_name = copilot.display_name if copilot else None
-
-        submit_res = await pirep_service.submit_fleet_pirep(
-            pilot1_discord_id=interaction.user.id,
-            pilot2_discord_id=pilot2_id,
-            frame_data=frame_data,
-            dep_icao=dep_icao,
-            arr_icao=arr_icao,
-            total_duration_hours=hours,
-            total_duration_minutes=minutes,
-            pilot1_name=interaction.user.display_name,
-            pilot2_name=pilot2_name,
-        )
-
-        p1_res = (submit_res or {}).get("pilot1_result") or {}
-        if not p1_res.get("success"):
-            err = submit_res.get("error") or p1_res.get("error") or "Failed to submit to CrewCenter."
-            await interaction.followup.send(f"Error submitting PIREP: {err}", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Fleet PIREP Filed Successfully (ACARS)",
-            color=discord.Color.green(),
-        )
-        embed.add_field(name="Flight", value=f"{matched_key} ({dep_icao} -> {arr_icao})", inline=False)
-        embed.add_field(name="Total Duration", value=duration_str, inline=False)
-        embed.add_field(
-            name="Pilot 1",
-            value=f"{interaction.user.mention} - {p1_res.get('duration', duration_str)} hours",
-            inline=False,
-        )
-        if copilot:
-            p2_res = (submit_res or {}).get("pilot2_result") or {}
-            embed.add_field(
-                name="Pilot 2 (Co-Pilot)",
-                value=f"{copilot.mention} - {p2_res.get('duration', 'N/A')} hours",
-                inline=False,
-            )
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @acars_live.error
-    async def acars_live_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, (app_commands.MissingRole, app_commands.MissingAnyRole)):
-            await interaction.response.send_message(
-                "You do not have the required Fleet or Executive role to use this command.",
-                ephemeral=True,
-            )
-        else:
-            logger.error(f"Error in acars_live: {error}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"Error: {error}", ephemeral=True)
+    # Deactivated temporarily per request (kept commented out for future reference):
+    # @app_commands.command(name="acars_live", description="Automatically file a fleet PIREP from your latest Infinite Flight flight")
+    # @app_commands.checks.has_any_role(*ALLOWED_ROLE_IDS)
+    # @app_commands.autocomplete(frame=frame_autocomplete)
+    # async def acars_live(
+    #     self,
+    #     interaction: discord.Interaction,
+    #     frame: Optional[str] = None,
+    #     copilot: Optional[discord.Member] = None,
+    # ):
+    #     """Automatically file a fleet PIREP using your latest Infinite Flight logbook flight."""
+    #     await interaction.response.defer(ephemeral=True)
+    #
+    #     if copilot and copilot.id == interaction.user.id:
+    #         await interaction.followup.send("Cannot select yourself as the co-pilot.", ephemeral=True)
+    #         return
+    #
+    #     pirep_service = self._get_pirep_service()
+    #     result = await pirep_service.fetch_if_flights(interaction.user.id)
+    #     if not result or not result.get("success"):
+    #         err = (result or {}).get("error") or "Could not fetch recent flights from Infinite Flight."
+    #         await interaction.followup.send(f"Error: {err}", ephemeral=True)
+    #         return
+    #
+    #     flights = result.get("flights") or []
+    #     if not flights:
+    #         await interaction.followup.send(
+    #             "No recent flights found in your Infinite Flight logbook. Please allow 1-2 minutes for Infinite Flight to sync and try again.",
+    #             ephemeral=True,
+    #         )
+    #         return
+    #
+    #     latest = flights[0]
+    #     dep_icao = str(latest.get("departure") or "").upper()
+    #     arr_icao = str(latest.get("arrival") or "").upper()
+    #     duration_str = latest.get("duration") or "00:00"
+    #
+    #     try:
+    #         parts = duration_str.split(":")
+    #         hours = int(parts[0])
+    #         minutes = int(parts[1])
+    #     except (ValueError, IndexError):
+    #         hours = 0
+    #         minutes = 0
+    #
+    #     frames_map = await self._get_live_fleet_frames()
+    #     matched_key = None
+    #     if frame:
+    #         matched_key = next(
+    #             (k for k in frames_map if k.upper() == frame.strip().upper()),
+    #             None,
+    #         )
+    #         if not matched_key:
+    #             await interaction.followup.send(f"Invalid frame selected: {frame}", ephemeral=True)
+    #             return
+    #     else:
+    #         monitor = self.bot.get_cog("StoppedFlightMonitor")
+    #         if monitor and hasattr(monitor, "_live_flight_trackers"):
+    #             for aid, trk in monitor._live_flight_trackers.items():
+    #                 if str(trk.get("discord_user_id")) == str(interaction.user.id):
+    #                     matched_key = trk.get("registration")
+    #                     break
+    #
+    #     if not matched_key:
+    #         await interaction.followup.send(
+    #             f"Detected latest flight: **{dep_icao}** -> **{arr_icao}** ({duration_str}).\n"
+    #             "Please specify which fleet frame you flew using `/acars_live frame:<REG>` (e.g. `frame:A7-BAE`).",
+    #             ephemeral=True,
+    #         )
+    #         return
+    #
+    #     frame_data = dict(frames_map.get(matched_key, {"name": matched_key}))
+    #     frame_data["name"] = matched_key
+    #
+    #     pilot2_id = copilot.id if copilot else None
+    #     pilot2_name = copilot.display_name if copilot else None
+    #
+    #     submit_res = await pirep_service.submit_fleet_pirep(
+    #         pilot1_discord_id=interaction.user.id,
+    #         pilot2_discord_id=pilot2_id,
+    #         frame_data=frame_data,
+    #         dep_icao=dep_icao,
+    #         arr_icao=arr_icao,
+    #         total_duration_hours=hours,
+    #         total_duration_minutes=minutes,
+    #         pilot1_name=interaction.user.display_name,
+    #         pilot2_name=pilot2_name,
+    #     )
+    #
+    #     p1_res = (submit_res or {}).get("pilot1_result") or {}
+    #     if not p1_res.get("success"):
+    #         err = submit_res.get("error") or p1_res.get("error") or "Failed to submit to CrewCenter."
+    #         await interaction.followup.send(f"Error submitting PIREP: {err}", ephemeral=True)
+    #         return
+    #
+    #     embed = discord.Embed(
+    #         title="Fleet PIREP Filed Successfully (ACARS)",
+    #         color=discord.Color.green(),
+    #     )
+    #     embed.add_field(name="Flight", value=f"{matched_key} ({dep_icao} -> {arr_icao})", inline=False)
+    #     embed.add_field(name="Total Duration", value=duration_str, inline=False)
+    #     embed.add_field(
+    #         name="Pilot 1",
+    #         value=f"{interaction.user.mention} - {p1_res.get('duration', duration_str)} hours",
+    #         inline=False,
+    #     )
+    #     if copilot:
+    #         p2_res = (submit_res or {}).get("pilot2_result") or {}
+    #         embed.add_field(
+    #             name="Pilot 2 (Co-Pilot)",
+    #             value=f"{copilot.mention} - {p2_res.get('duration', 'N/A')} hours",
+    #             inline=False,
+    #         )
+    #
+    #     await interaction.followup.send(embed=embed, ephemeral=True)
+    #
+    # @acars_live.error
+    # async def acars_live_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    #     if isinstance(error, (app_commands.MissingRole, app_commands.MissingAnyRole)):
+    #         await interaction.response.send_message(
+    #             "You do not have the required Fleet or Executive role to use this command.",
+    #             ephemeral=True,
+    #         )
+    #     else:
+    #         logger.error(f"Error in acars_live: {error}")
+    #         if not interaction.response.is_done():
+    #             await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
 
 async def setup(bot):
