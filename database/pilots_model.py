@@ -92,6 +92,14 @@ class PilotsModel:
         args = (ifuserid,)
         return await self.db.fetch_one(query, args)
 
+    async def get_active_pilot_by_ifuserid(self, ifuserid: str) -> Optional[Dict]:
+        """Retrieve an active pilot's full VA record (including ID) by IF user ID."""
+        query = (
+            "SELECT id, callsign, name, discordid, ifuserid, ifc "
+            "FROM pilots WHERE ifuserid = %s AND status = 1"
+        )
+        return await self.db.fetch_one(query, (str(ifuserid).strip(),))
+
     async def get_pilot_by_ifc_username(self, username: str) -> Optional[Dict]:
         """
         Retrieves a pilot's data using their IFC username as a fallback.

@@ -376,6 +376,38 @@ class RoutesModel:
         results = await self.db.fetch_all(query)
         return [row['liveryname'] for row in results if row['liveryname'].strip()]
 
+    async def find_routes_from_origin_to_destinations_for_aircraft(
+        self,
+        origin_icao: str,
+        destination_icaos: List[str],
+        aircraft_ids: List[int],
+    ) -> List[Dict]:
+        """Return distinct routes from origin_icao to destination_icaos matching any aircraft_id."""
+        clean_dests = sorted({str(d).strip().upper() for d in (destination_icaos or []) if d})
+        clean_aircraft = sorted({int(aid) for aid in (aircraft_ids or []) if aid is not None})
+        if not clean_dests or not clean_aircraft:
+            return []
+
+        dest_placeholders = ", ".join(["%s"] * len(clean_dests))
+        ac_placeholders = ", ".join(["%s"] * len(clean_aircraft))
+        query = f"""
+            SELECT
+                r.id AS route_id,
+                r.dep,
+                r.arr,
+                r.fltnum,
+                r.duration,
+                ra.aircraftid AS aircraft_id
+            FROM routes r
+            INNER JOIN route_aircraft ra ON r.id = ra.routeid
+            WHERE r.dep = %s
+              AND r.arr IN ({dest_placeholders})
+              AND ra.aircraftid IN ({ac_placeholders})
+            ORDER BY r.arr ASC, r.id ASC
+        """
+        args = (str(origin_icao).strip().upper(), *clean_dests, *clean_aircraft)
+        return await self.db.fetch_all(query, args) or []
+
 '''
 === DATABASE STRUCTURE: routes ===
 

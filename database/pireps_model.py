@@ -733,6 +733,44 @@ class PirepsModel:
             'total_flights': len(pireps)
         }
 
+    async def find_latest_pirep_id(
+        self,
+        pilot_id: int,
+        flight_num: str,
+        departure: str,
+        arrival: str,
+    ) -> int | None:
+        """Return the newest PIREP ID matching pilot, flight number, and route."""
+        query = """
+            SELECT id
+            FROM pireps
+            WHERE pilotid = %s
+              AND flightnum = %s
+              AND departure = %s
+              AND arrival = %s
+            ORDER BY id DESC
+            LIMIT 1
+        """
+        row = await self.db.fetch_one(
+            query,
+            (int(pilot_id), str(flight_num), str(departure).upper(), str(arrival).upper()),
+        )
+        return int(row['id']) if row and row.get('id') is not None else None
+
+    async def get_pireps_statuses(self, pirep_ids: list[int]) -> dict[int, dict]:
+        """Batch-fetch PIREP status rows keyed by pirep ID."""
+        clean_ids = sorted({int(pid) for pid in (pirep_ids or []) if pid is not None})
+        if not clean_ids:
+            return {}
+        placeholders = ", ".join(["%s"] * len(clean_ids))
+        query = f"""
+            SELECT id, pilotid, status, flightnum, departure, arrival, flighttime, multi
+            FROM pireps
+            WHERE id IN ({placeholders})
+        """
+        rows = await self.db.fetch_all(query, tuple(clean_ids)) or []
+        return {int(row['id']): row for row in rows if row.get('id') is not None}
+
     async def get_approved_pireps_by_route_and_date_range(self, departure: str, arrival: str, hours: int = 48) -> list[dict]:
         """
         Retrieves all approved PIREPs (status=1) for a specific route within the last X hours.

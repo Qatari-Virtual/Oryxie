@@ -112,3 +112,124 @@ class EventTransactionModel:
             ORDER BY total_balance DESC
         """
         return await self.db.fetch_all(query, ('Candy Drop Claim:%', '2025-11-01 00:00:00', self.currency_name))
+
+    async def get_strict_balance(
+        self,
+        pilot_id: int,
+        event_name: Optional[str] = None,
+        currency_name: Optional[str] = None,
+    ) -> int:
+        """Fetch balance strictly isolated to a single event_name and currency_name."""
+        ev = event_name or self.event_name
+        curr = currency_name or self.currency_name
+        query = """
+            SELECT COALESCE(SUM(amount), 0) AS balance
+            FROM event_transactions
+            WHERE pilot_id = %s
+              AND event_name = %s
+              AND currency_name = %s
+        """
+        result = await self.db.fetch_one(query, (int(pilot_id), ev, curr))
+        return int(result['balance']) if result else 0
+
+    async def get_strict_top_holders(
+        self,
+        limit: int = 10,
+        event_name: Optional[str] = None,
+        currency_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch top currency holders strictly isolated by event_name and currency_name."""
+        ev = event_name or self.event_name
+        curr = currency_name or self.currency_name
+        query = """
+            SELECT
+                et.pilot_id,
+                p.callsign,
+                p.discordid,
+                COALESCE(SUM(et.amount), 0) AS total_balance
+            FROM event_transactions et
+            JOIN pilots p ON et.pilot_id = p.id
+            WHERE p.status = 1
+              AND et.event_name = %s
+              AND et.currency_name = %s
+            GROUP BY et.pilot_id, p.callsign, p.discordid
+            HAVING total_balance > 0
+            ORDER BY total_balance DESC
+            LIMIT %s
+        """
+        return await self.db.fetch_all(query, (ev, curr, int(limit))) or []
+
+    async def check_strict_duplicate(
+        self,
+        pilot_id: int,
+        reason_pattern: str,
+        event_name: Optional[str] = None,
+        currency_name: Optional[str] = None,
+    ) -> bool:
+        """Check whether a transaction already exists for the exact event and currency."""
+        ev = event_name or self.event_name
+        curr = currency_name or self.currency_name
+        query = """
+            SELECT id
+            FROM event_transactions
+            WHERE pilot_id = %s
+              AND event_name = %s
+              AND currency_name = %s
+              AND reason LIKE %s
+            LIMIT 1
+        """
+        result = await self.db.fetch_one(query, (int(pilot_id), ev, curr, reason_pattern))
+        return result is not None
+
+    async def add_strict_transaction(
+        self,
+        pilot_id: int,
+        amount: int,
+        reason: str,
+        event_name: Optional[str] = None,
+        currency_name: Optional[str] = None,
+    ) -> bool:
+        """Insert a transaction strictly tagged with event_name and currency_name."""
+        ev = event_name or self.event_name
+        curr = currency_name or self.currency_name
+        query = """
+            INSERT INTO event_transactions (pilot_id, event_name, currency_name, amount, reason)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        affected = await self.db.execute(query, (int(pilot_id), ev, curr, int(amount), reason))
+        return bool(affected)
+
+    async def get_strict_records(
+        self,
+        limit: int = 25,
+        pilot_id: Optional[int] = None,
+        event_name: Optional[str] = None,
+        currency_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent transactions strictly filtered by event_name and currency_name."""
+        ev = event_name or self.event_name
+        curr = currency_name or self.currency_name
+        if pilot_id is not None:
+            query = """
+                SELECT et.*, p.callsign
+                FROM event_transactions et
+                LEFT JOIN pilots p ON et.pilot_id = p.id
+                WHERE et.event_name = %s
+                  AND et.currency_name = %s
+                  AND et.pilot_id = %s
+                ORDER BY et.id DESC
+                LIMIT %s
+            """
+            args = (ev, curr, int(pilot_id), int(limit))
+        else:
+            query = """
+                SELECT et.*, p.callsign
+                FROM event_transactions et
+                LEFT JOIN pilots p ON et.pilot_id = p.id
+                WHERE et.event_name = %s
+                  AND et.currency_name = %s
+                ORDER BY et.id DESC
+                LIMIT %s
+            """
+            args = (ev, curr, int(limit))
+        return await self.db.fetch_all(query, args) or []
